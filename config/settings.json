@@ -1,0 +1,17 @@
+{
+  "adspower": {
+    "api_url": "http://local.adspower.net:50325",
+    "default_profile_id": ""
+  },
+  "default_values": {
+    "article_type": "cg",
+    "section": "1",
+    "keyword_age": "156023",
+    "ai_generated_type": "2",
+    "vr_compatible": "",
+    "revision_flg": "1",
+    "monopoly_hope_flg": "0",
+    "drm_hope": "none",
+    "campaign_auto_join_flg_set_days": "0"
+  }
+}

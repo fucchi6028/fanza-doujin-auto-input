@@ -1,0 +1,39 @@
+{
+  "title": "サンプル作品タイトル",
+  "title_ruby": "さんぷるさくひんたいとる",
+  "article_type": "cg",
+  "ai_generated_type": "1",
+  "section": "1",
+  "keyword_age": "156023",
+  "comment": "作品の説明文をここに記入します。\n\n改行も可能です。",
+  "series": "",
+  "file_number": "20",
+  "keywords": ["153003", "2001"],
+  "parody_type": "1",
+  "parody_names": ["", "", "", ""],
+  "keyword_event": "0",
+  "vr_compatible": "",
+  "creators": {
+    "author": ["作者名"],
+    "scenario": [],
+    "illustrator": [],
+    "voice_actor": [],
+    "music": []
+  },
+  "price_retail": "1100",
+  "monopoly_hope_flg": "0",
+  "drm_hope": "none",
+  "revision_flg": "1",
+  "campaign_kibou_flg": true,
+  "is_coupon_usable": true,
+  "campaign_auto_join_flg_set_days": "30",
+  "release_date_type": "1",
+  "release_date": "",
+  "note": "",
+  "files": {
+    "main": "main.zip",
+    "package": "package.jpg",
+    "thumbnail": "thumbnail.jpg",
+    "samples": ["sample01.jpg", "sample02.jpg"]
+  }
+}
