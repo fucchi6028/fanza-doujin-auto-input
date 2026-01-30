@@ -44,21 +44,23 @@ class FanzaFormFiller:
     def _click_radio(self, name: str, value: str):
         """ラジオボタンを選択"""
         try:
-            # まずラベルをクリックしてみる（より確実）
-            try:
-                label = self.driver.find_element(
-                    By.CSS_SELECTOR, f"label[for*='{name}'][for*='{value}'], label:has(input[name='{name}'][value='{value}'])"
-                )
-                self.driver.execute_script("arguments[0].click();", label)
-            except:
-                # ラベルが見つからない場合は直接inputをクリック
-                radio = self.driver.find_element(By.CSS_SELECTOR, f"input[name='{name}'][value='{value}']")
-                self.driver.execute_script("arguments[0].click();", radio)
+            # 直接ラジオボタンをクリック
+            radio = self.driver.find_element(By.CSS_SELECTOR, f"input[name='{name}'][value='{value}']")
+            self.driver.execute_script("arguments[0].click();", radio)
             time.sleep(0.5)
             return True
         except Exception as e:
-            self._report(f"ラジオボタン選択エラー ({name}={value}): {e}")
-            return False
+            # ラジオボタンが見つからない場合はラベルを試す
+            try:
+                label = self.driver.find_element(
+                    By.CSS_SELECTOR, f"label[for='{name}--{value}']"
+                )
+                self.driver.execute_script("arguments[0].click();", label)
+                time.sleep(0.5)
+                return True
+            except:
+                self._report(f"ラジオボタン選択エラー ({name}={value}): {e}")
+                return False
 
     def _fill_input(self, name: str, value: str):
         """入力フィールドに値を設定"""
@@ -101,6 +103,24 @@ class FanzaFormFiller:
             return True
         except Exception as e:
             self._report(f"チェックボックス設定エラー ({name}={value}): {e}")
+            return False
+
+    def _select_dropdown(self, name: str, value: str):
+        """セレクトボックスの値を選択"""
+        try:
+            select_elem = self.driver.find_element(By.CSS_SELECTOR, f"select[name='{name}']")
+            # optionを選択
+            option = select_elem.find_element(By.CSS_SELECTOR, f"option[value='{value}']")
+            self.driver.execute_script("arguments[0].selected = true;", option)
+            # changeイベントを発火
+            self.driver.execute_script(
+                "arguments[0].dispatchEvent(new Event('change', { bubbles: true }));",
+                select_elem
+            )
+            time.sleep(0.3)
+            return True
+        except Exception as e:
+            self._report(f"セレクト選択エラー ({name}={value}): {e}")
             return False
 
     def _click_category_tab(self, category_name: str):
@@ -225,7 +245,8 @@ class FanzaFormFiller:
 
         # 作品区分（男性向け等）
         if data.get("section"):
-            self._click_radio("section", data["section"])
+            if self._click_radio("section", data["section"]):
+                self._report(f"作品区分選択完了: {data['section']}")
 
         # 年齢指定
         if data.get("keyword_age"):
@@ -335,6 +356,24 @@ class FanzaFormFiller:
         # キャンペーン自動参加
         if data.get("campaign_auto_join_flg_set_days"):
             self._click_radio("campaign_auto_join_flg_set_days", data["campaign_auto_join_flg_set_days"])
+
+        # 割引設定
+        discount_flg = data.get("pre_release_articles_campaign_flg", "1")
+        if self._click_radio("pre_release_articles_campaign_flg", discount_flg):
+            self._report(f"割引設定: {'設定する' if discount_flg == '1' else '設定しない'}")
+            time.sleep(0.5)
+
+        # 割引設定が有効な場合のみ詳細を設定
+        if discount_flg == "1":
+            # 実施期間
+            discount_days = data.get("pre_release_articles_campaign_discount_days", "28")
+            if self._select_dropdown("pre_release_articles_campaign_discount_days", discount_days):
+                self._report(f"割引実施期間: {discount_days}日")
+
+            # 割引率
+            discount_rate = data.get("pre_release_articles_campaign_discount_rate", "80")
+            if self._select_dropdown("pre_release_articles_campaign_discount_rate", discount_rate):
+                self._report(f"割引率: {discount_rate}%")
 
         self._report("販売情報入力完了")
         return True

@@ -2,7 +2,7 @@
 cd /d "%~dp0"
 
 echo ========================================
-echo   FANZA Auto Input Tool
+echo   FANZA Auto Input Tool (tkinter)
 echo ========================================
 echo.
 
@@ -13,17 +13,17 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-pip show flet > nul 2>&1
+pip show selenium > nul 2>&1
 if %errorlevel% neq 0 (
     echo Installing dependencies...
-    pip install -r requirements.txt
+    pip install selenium requests openai
 )
 
 echo.
 echo Starting application...
 echo.
 
-python main.py
+python main_tk.py
 
 if %errorlevel% neq 0 (
     echo.

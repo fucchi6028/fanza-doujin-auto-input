@@ -1,6 +1,6 @@
 """
 シリーズ別設定保存モジュール
-ベースフォルダ名ごとにキーワードと販売情報を保存
+プロファイル＋シリーズ名ごとにキーワードと販売情報を保存
 """
 import json
 import os
@@ -39,47 +39,72 @@ class SeriesStorage:
         except Exception as e:
             print(f"Series storage save error: {e}")
 
-    def _get_or_create(self, base_folder_name: str) -> dict:
-        """ベースフォルダのデータを取得（なければ作成）"""
-        if base_folder_name not in self.storage:
-            self.storage[base_folder_name] = {
+    @staticmethod
+    def make_key(profile_id: str, series_name: str) -> str:
+        """プロファイルIDとシリーズ名からストレージキーを生成"""
+        return f"{profile_id}_{series_name}"
+
+    def _get_or_create(self, key: str) -> dict:
+        """データを取得（なければ作成）"""
+        if key not in self.storage:
+            self.storage[key] = {
                 "keywords": [],
                 "sales_info": {}
             }
-        return self.storage[base_folder_name]
+        return self.storage[key]
 
     # キーワード関連
-    def get_keywords(self, base_folder_name: str) -> list[str]:
+    def get_keywords(self, key: str) -> list[str]:
         """キーワードを取得"""
-        data = self.storage.get(base_folder_name, {})
+        data = self.storage.get(key, {})
         return data.get("keywords", [])
 
-    def save_keywords(self, base_folder_name: str, keywords: list[str]):
+    def get_keywords_by_profile_series(self, profile_id: str, series_name: str) -> list[str]:
+        """プロファイルIDとシリーズ名でキーワードを取得"""
+        key = self.make_key(profile_id, series_name)
+        return self.get_keywords(key)
+
+    def save_keywords(self, key: str, keywords: list[str]):
         """キーワードを保存"""
-        data = self._get_or_create(base_folder_name)
+        data = self._get_or_create(key)
         data["keywords"] = keywords
         self.save()
 
+    def save_keywords_by_profile_series(self, profile_id: str, series_name: str, keywords: list[str]):
+        """プロファイルIDとシリーズ名でキーワードを保存"""
+        key = self.make_key(profile_id, series_name)
+        self.save_keywords(key, keywords)
+
     # 販売情報関連
-    def get_sales_info(self, base_folder_name: str) -> dict:
+    def get_sales_info(self, key: str) -> dict:
         """販売情報を取得"""
-        data = self.storage.get(base_folder_name, {})
+        data = self.storage.get(key, {})
         return data.get("sales_info", {})
 
-    def save_sales_info(self, base_folder_name: str, sales_info: dict):
+    def get_sales_info_by_profile_series(self, profile_id: str, series_name: str) -> dict:
+        """プロファイルIDとシリーズ名で販売情報を取得"""
+        key = self.make_key(profile_id, series_name)
+        return self.get_sales_info(key)
+
+    def save_sales_info(self, key: str, sales_info: dict):
         """販売情報を保存"""
-        data = self._get_or_create(base_folder_name)
+        data = self._get_or_create(key)
         data["sales_info"] = sales_info
         self.save()
 
-    def has_data(self, base_folder_name: str) -> bool:
-        """指定したベースフォルダにデータが保存されているか"""
-        return base_folder_name in self.storage
+    def save_sales_info_by_profile_series(self, profile_id: str, series_name: str, sales_info: dict):
+        """プロファイルIDとシリーズ名で販売情報を保存"""
+        key = self.make_key(profile_id, series_name)
+        self.save_sales_info(key, sales_info)
 
-    def delete_data(self, base_folder_name: str):
-        """ベースフォルダのデータを削除"""
-        if base_folder_name in self.storage:
-            del self.storage[base_folder_name]
+    def has_data(self, key: str) -> bool:
+        """指定したキーにデータが保存されているか"""
+        return key in self.storage
+
+    def delete_data(self, key: str):
+        """データを削除"""
+        if key in self.storage:
+            del self.storage[key]
             self.save()
 
 

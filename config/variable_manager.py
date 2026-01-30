@@ -84,6 +84,11 @@ class VariableManager:
         """デフォルト変数を設定"""
         self.variables = [
             VariableConfig(
+                name="シリーズ名",
+                var_type="series",
+                description="シリーズフォルダ名"
+            ),
+            VariableConfig(
                 name="商品フォルダ",
                 var_type="product",
                 description="商品フォルダ名"
@@ -208,6 +213,30 @@ def count_total_images_in_character_folders(product_path: Path, min_images: int 
     return total
 
 
+def count_all_images_in_product(product_path: Path) -> int:
+    """
+    商品フォルダ内のすべての画像をカウント（直下＋サブフォルダ）
+
+    Args:
+        product_path: 商品フォルダのパス
+
+    Returns:
+        画像の合計枚数
+    """
+    total = 0
+    try:
+        # 直下の画像をカウント
+        total += count_images_in_folder(product_path)
+
+        # サブフォルダ内の画像をカウント
+        for subfolder in product_path.iterdir():
+            if subfolder.is_dir():
+                total += count_images_in_folder(subfolder)
+    except Exception as e:
+        print(f"Count all images error: {e}")
+    return total
+
+
 def mask_second_char(text: str) -> str:
     """2文字目を〇で伏字にする"""
     if len(text) >= 2:
@@ -253,8 +282,8 @@ def process_description_template(
         replacement = ""
 
         if var.var_type == "series":
-            # シリーズ名（伏字）
-            replacement = mask_second_char(series_name)
+            # シリーズ名（伏字なし）
+            replacement = series_name
 
         elif var.var_type == "product":
             # 商品名（伏字）
@@ -287,8 +316,8 @@ def read_description_file(product_path: Path) -> str:
     Returns:
         説明文の内容（見つからない場合は空文字）
     """
-    # 可能なファイル名
-    possible_names = ["説明文.txt", "説明文", "description.txt"]
+    # 可能なファイル名（スペース付きも対応）
+    possible_names = ["説明文.txt", "説明文 .txt", "説明文", "description.txt"]
 
     for name in possible_names:
         file_path = product_path / name
