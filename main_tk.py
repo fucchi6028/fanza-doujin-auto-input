@@ -198,6 +198,18 @@ class FanzaAutoInputApp:
         self.discount_enabled_var = tk.BooleanVar(value=True)
         self.release_date_type_var = tk.StringVar(value="1")
 
+        # 予約作品用UI変数
+        self.trailer_title_var = tk.StringVar()
+        self.trailer_title_ruby_var = tk.StringVar()
+        self.trailer_price_undecided_var = tk.BooleanVar(value=True)  # 販売価格未定（デフォルトON）
+        self.trailer_price_var = tk.StringVar(value="800")
+        self.trailer_monopoly_var = tk.BooleanVar(value=False)
+        self.trailer_file_number_var = tk.StringVar()
+        self.trailer_release_date_type_var = tk.StringVar(value="1")  # 予告開始日指定（デフォルト: 最短で公開）
+        self.trailer_release_undecided_var = tk.BooleanVar(value=True)  # 配信予定未定（デフォルトON）
+        self.trailer_selected_keywords = []
+        self.trailer_keyword_buttons = {}
+
         self.create_ui()
         self.load_initial_data()
 
@@ -381,6 +393,11 @@ class FanzaAutoInputApp:
         self.input_frame = ttk.Frame(self.notebook)
         self.notebook.add(self.input_frame, text="作品入力")
         self.create_input_tab()
+
+        # 予約作品入力タブ
+        self.trailer_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.trailer_frame, text="予約作品入力")
+        self.create_trailer_input_tab()
 
         # 設定タブ
         self.settings_frame = ttk.Frame(self.notebook)
@@ -670,6 +687,562 @@ class FanzaAutoInputApp:
         )
         self.note_text.pack(padx=5, pady=2)
 
+    def create_trailer_input_tab(self):
+        """予約作品入力タブを作成"""
+        c = self.COLORS
+        # スクロール可能なキャンバス
+        canvas = tk.Canvas(self.trailer_frame, bg=c["bg"], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self.trailer_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        # マウスホイールスクロール
+        self.trailer_canvas = canvas
+        def on_mousewheel(event):
+            widget = event.widget
+            if isinstance(widget, tk.Text):
+                return
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+
+        canvas.bind("<MouseWheel>", on_mousewheel)
+        scrollable_frame.bind("<MouseWheel>", on_mousewheel)
+
+        def bind_mousewheel(widget):
+            if not isinstance(widget, tk.Text):
+                widget.bind("<MouseWheel>", on_mousewheel)
+            for child in widget.winfo_children():
+                bind_mousewheel(child)
+
+        scrollable_frame.bind("<Map>", lambda e: bind_mousewheel(scrollable_frame))
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # === 作品選択セクション ===
+        select_frame = ttk.LabelFrame(scrollable_frame, text="予約作品選択", padding=10)
+        select_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        # プロファイル選択
+        ttk.Label(select_frame, text="プロファイル:").grid(row=0, column=0, sticky=tk.W, padx=5)
+        self.trailer_profile_combo = ttk.Combobox(select_frame, width=25, state="readonly")
+        self.trailer_profile_combo.grid(row=0, column=1, padx=5, pady=2)
+        self.trailer_profile_combo.bind("<<ComboboxSelected>>", self.on_trailer_profile_change)
+
+        # ベースフォルダ選択
+        ttk.Label(select_frame, text="ベースフォルダ:").grid(row=0, column=2, sticky=tk.W, padx=5)
+        self.trailer_base_folder_combo = ttk.Combobox(select_frame, width=25, state="readonly")
+        self.trailer_base_folder_combo.grid(row=0, column=3, padx=5, pady=2)
+        self.trailer_base_folder_combo.bind("<<ComboboxSelected>>", self.on_trailer_base_folder_change)
+
+        # シリーズ選択
+        ttk.Label(select_frame, text="シリーズ:").grid(row=1, column=0, sticky=tk.W, padx=5)
+        self.trailer_series_combo = ttk.Combobox(select_frame, width=25, state="readonly")
+        self.trailer_series_combo.grid(row=1, column=1, padx=5, pady=2)
+        self.trailer_series_combo.bind("<<ComboboxSelected>>", self.on_trailer_series_change)
+
+        # 商品フォルダ選択
+        ttk.Label(select_frame, text="商品フォルダ:").grid(row=1, column=2, sticky=tk.W, padx=5)
+        self.trailer_product_combo = ttk.Combobox(select_frame, width=25, state="readonly")
+        self.trailer_product_combo.grid(row=1, column=3, padx=5, pady=2)
+        self.trailer_product_combo.bind("<<ComboboxSelected>>", self.on_trailer_product_change)
+
+        # ボタン
+        btn_frame = ttk.Frame(select_frame)
+        btn_frame.grid(row=2, column=0, columnspan=4, pady=10)
+        ttk.Button(btn_frame, text="保存", command=self.save_trailer_product, style="Success.TButton").pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="予約作品入力開始", command=self.start_trailer_auto_input, style="Accent.TButton").pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="再読み込み", command=self.reload_trailer_product).pack(side=tk.LEFT, padx=5)
+
+        # === 基本設定セクション ===
+        basic_frame = ttk.LabelFrame(scrollable_frame, text="基本設定", padding=10)
+        basic_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        # タイトル
+        ttk.Label(basic_frame, text="タイトル:").grid(row=0, column=0, sticky=tk.W, padx=5)
+        ttk.Entry(basic_frame, textvariable=self.trailer_title_var, width=60).grid(row=0, column=1, columnspan=3, sticky=tk.W, padx=5, pady=2)
+
+        # ふりがな
+        ttk.Label(basic_frame, text="ふりがな:").grid(row=1, column=0, sticky=tk.W, padx=5)
+        ttk.Entry(basic_frame, textvariable=self.trailer_title_ruby_var, width=60).grid(row=1, column=1, columnspan=3, sticky=tk.W, padx=5, pady=2)
+
+        # 作品形式
+        ttk.Label(basic_frame, text="作品形式:").grid(row=2, column=0, sticky=tk.W, padx=5)
+        self.trailer_article_combo = ttk.Combobox(basic_frame, width=20, state="readonly")
+        self.trailer_article_combo['values'] = [v for k, v in ARTICLE_TYPES]
+        self.trailer_article_combo.current(1)  # デフォルト: CG
+        self.trailer_article_combo.grid(row=2, column=1, sticky=tk.W, padx=5, pady=2)
+
+        # AI利用
+        ttk.Label(basic_frame, text="AI利用:").grid(row=2, column=2, sticky=tk.W, padx=5)
+        self.trailer_ai_combo = ttk.Combobox(basic_frame, width=35, state="readonly")
+        self.trailer_ai_combo['values'] = [v for k, v in AI_GENERATED_TYPES]
+        self.trailer_ai_combo.current(1)  # デフォルト: AIで作品を生成している
+        self.trailer_ai_combo.grid(row=2, column=3, sticky=tk.W, padx=5, pady=2)
+
+        # 作品区分
+        ttk.Label(basic_frame, text="作品区分:").grid(row=3, column=0, sticky=tk.W, padx=5)
+        self.trailer_section_combo = ttk.Combobox(basic_frame, width=15, state="readonly")
+        self.trailer_section_combo['values'] = [v for k, v in SECTIONS]
+        self.trailer_section_combo.current(0)  # デフォルト: 男性向け
+        self.trailer_section_combo.grid(row=3, column=1, sticky=tk.W, padx=5, pady=2)
+
+        # 年齢指定
+        ttk.Label(basic_frame, text="年齢指定:").grid(row=3, column=2, sticky=tk.W, padx=5)
+        self.trailer_age_combo = ttk.Combobox(basic_frame, width=15, state="readonly")
+        self.trailer_age_combo['values'] = [v for k, v in KEYWORD_AGES]
+        self.trailer_age_combo.current(0)  # デフォルト: 成人向け
+        self.trailer_age_combo.grid(row=3, column=3, sticky=tk.W, padx=5, pady=2)
+
+        # === 作品内容セクション ===
+        content_frame = ttk.LabelFrame(scrollable_frame, text="作品内容", padding=10)
+        content_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        ttk.Label(content_frame, text="説明文:").grid(row=0, column=0, sticky=tk.NW, padx=5)
+
+        # 説明文フレーム
+        comment_frame = ttk.Frame(content_frame)
+        comment_frame.grid(row=0, column=1, padx=5, pady=2, sticky=tk.W)
+
+        comment_scrollbar = ttk.Scrollbar(comment_frame)
+        comment_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.trailer_comment_text = tk.Text(
+            comment_frame, width=80, height=12,
+            yscrollcommand=comment_scrollbar.set,
+            bg=c["entry_bg"], fg=c["entry_fg"],
+            insertbackground=c["fg"],
+            selectbackground=c["accent"],
+            selectforeground="#ffffff",
+            font=("Meiryo UI", 10),
+            relief=tk.FLAT,
+            padx=8, pady=8
+        )
+        self.trailer_comment_text.pack(side=tk.LEFT, fill=tk.BOTH)
+        comment_scrollbar.config(command=self.trailer_comment_text.yview)
+
+        def on_comment_mousewheel(event):
+            self.trailer_comment_text.yview_scroll(int(-1*(event.delta/120)), "units")
+            return "break"
+        self.trailer_comment_text.bind("<MouseWheel>", on_comment_mousewheel)
+
+        # サイズ調整ボタン
+        size_frame = ttk.Frame(content_frame)
+        size_frame.grid(row=0, column=2, sticky=tk.N, padx=5)
+        ttk.Button(size_frame, text="大", width=3, command=lambda: self.trailer_comment_text.config(height=16)).pack(pady=2)
+        ttk.Button(size_frame, text="中", width=3, command=lambda: self.trailer_comment_text.config(height=12)).pack(pady=2)
+        ttk.Button(size_frame, text="小", width=3, command=lambda: self.trailer_comment_text.config(height=8)).pack(pady=2)
+
+        ttk.Label(content_frame, text="枚数:").grid(row=1, column=0, sticky=tk.W, padx=5)
+        ttk.Entry(content_frame, textvariable=self.trailer_file_number_var, width=15, state="readonly").grid(row=1, column=1, sticky=tk.W, padx=5, pady=2)
+
+        # === パロディ設定セクション ===
+        parody_frame = ttk.LabelFrame(scrollable_frame, text="パロディ設定", padding=10)
+        parody_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        ttk.Label(parody_frame, text="パロディ:").grid(row=0, column=0, sticky=tk.W, padx=5)
+        self.trailer_parody_combo = ttk.Combobox(parody_frame, width=20, state="readonly")
+        self.trailer_parody_combo['values'] = ["(選択してください)"] + [v for k, v in PARODY_TYPES]
+        self.trailer_parody_combo.current(0)
+        self.trailer_parody_combo.grid(row=0, column=1, sticky=tk.W, padx=5, pady=2)
+
+        self.trailer_parody_entries = []
+        for i in range(4):
+            ttk.Label(parody_frame, text=f"詳細{i+1}:").grid(row=1, column=i*2, sticky=tk.W, padx=5)
+            entry = ttk.Entry(parody_frame, width=20)
+            entry.grid(row=1, column=i*2+1, sticky=tk.W, padx=2, pady=2)
+            self.trailer_parody_entries.append(entry)
+
+        # === キーワードセクション ===
+        keyword_frame = ttk.LabelFrame(scrollable_frame, text="キーワード（最大10個）", padding=10)
+        keyword_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        # 選択状態表示
+        keyword_status_frame = ttk.Frame(keyword_frame)
+        keyword_status_frame.pack(fill=tk.X, pady=5)
+
+        self.trailer_keyword_label = ttk.Label(keyword_status_frame, text="選択中: 0/10")
+        self.trailer_keyword_label.pack(side=tk.LEFT)
+
+        ttk.Button(keyword_status_frame, text="キーワード保存", command=self.save_trailer_keywords_to_storage, style="Success.TButton").pack(side=tk.RIGHT, padx=5)
+        ttk.Button(keyword_status_frame, text="クリア", command=self.clear_trailer_keywords).pack(side=tk.RIGHT, padx=5)
+
+        self.trailer_keyword_display = ttk.Label(keyword_frame, text="", wraplength=900, foreground=c["success"])
+        self.trailer_keyword_display.pack(anchor=tk.W, pady=5)
+
+        # カテゴリタブ
+        self.trailer_keyword_notebook = ttk.Notebook(keyword_frame)
+        self.trailer_keyword_notebook.pack(fill=tk.BOTH, expand=True, pady=5)
+
+        # 人気キーワードタブ
+        popular_tab = ttk.Frame(self.trailer_keyword_notebook)
+        self.trailer_keyword_notebook.add(popular_tab, text="人気")
+        self.create_trailer_keyword_buttons(popular_tab, [(kid, name, True) for kid, name in POPULAR_KEYWORDS])
+
+        # 各カテゴリタブ
+        for cat_id, cat_name in KEYWORD_CATEGORIES:
+            tab = ttk.Frame(self.trailer_keyword_notebook)
+            self.trailer_keyword_notebook.add(tab, text=cat_name[:6])
+            keywords = KEYWORDS_BY_CATEGORY.get(cat_id, [])
+            self.create_trailer_keyword_buttons(tab, keywords)
+
+        # === 販売情報セクション ===
+        sales_frame = ttk.LabelFrame(scrollable_frame, text="販売情報", padding=10)
+        sales_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        # 販売価格（未定チェックボックス付き）
+        ttk.Label(sales_frame, text="販売価格:").grid(row=0, column=0, sticky=tk.W, padx=5)
+        ttk.Checkbutton(sales_frame, text="未定", variable=self.trailer_price_undecided_var,
+                       command=self.toggle_trailer_price).grid(row=0, column=1, sticky=tk.W, padx=5)
+        self.trailer_price_entry = ttk.Entry(sales_frame, textvariable=self.trailer_price_var, width=15, state="disabled")
+        self.trailer_price_entry.grid(row=0, column=2, sticky=tk.W, padx=5, pady=2)
+        ttk.Label(sales_frame, text="円（税抜）").grid(row=0, column=3, sticky=tk.W)
+
+        ttk.Checkbutton(sales_frame, text="専売希望", variable=self.trailer_monopoly_var).grid(row=0, column=4, padx=20)
+
+        ttk.Label(sales_frame, text="作品保護:").grid(row=1, column=0, sticky=tk.W, padx=5)
+        self.trailer_drm_combo = ttk.Combobox(sales_frame, width=20, state="readonly")
+        self.trailer_drm_combo['values'] = [v for k, v in DRM_OPTIONS]
+        self.trailer_drm_combo.current(0)  # デフォルト: なし
+        self.trailer_drm_combo.grid(row=1, column=1, columnspan=2, sticky=tk.W, padx=5, pady=2)
+
+        # 予告開始日指定
+        ttk.Label(sales_frame, text="予告開始日:").grid(row=2, column=0, sticky=tk.W, padx=5)
+        trailer_release_frame = ttk.Frame(sales_frame)
+        trailer_release_frame.grid(row=2, column=1, columnspan=4, sticky=tk.W, padx=5, pady=2)
+        ttk.Radiobutton(trailer_release_frame, text="最短で公開", variable=self.trailer_release_date_type_var, value="1").pack(side=tk.LEFT)
+        ttk.Radiobutton(trailer_release_frame, text="日付を指定して公開", variable=self.trailer_release_date_type_var, value="2").pack(side=tk.LEFT, padx=10)
+
+        # 配信予定
+        ttk.Label(sales_frame, text="配信予定:").grid(row=3, column=0, sticky=tk.W, padx=5)
+        ttk.Checkbutton(sales_frame, text="未定", variable=self.trailer_release_undecided_var).grid(row=3, column=1, sticky=tk.W, padx=5)
+
+        # === 通信欄セクション ===
+        note_frame = ttk.LabelFrame(scrollable_frame, text="通信欄", padding=10)
+        note_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        self.trailer_note_text = tk.Text(
+            note_frame, width=80, height=3,
+            bg=c["entry_bg"], fg=c["entry_fg"],
+            insertbackground=c["fg"],
+            selectbackground=c["accent"],
+            selectforeground="#ffffff",
+            font=("Meiryo UI", 10),
+            relief=tk.FLAT,
+            padx=8, pady=8
+        )
+        self.trailer_note_text.pack(padx=5, pady=2)
+
+    def create_trailer_keyword_buttons(self, parent, keywords):
+        """予約作品用キーワードボタンを作成"""
+        c = self.COLORS
+        canvas = tk.Canvas(parent, height=180, bg=c["bg"], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        btn_frame = ttk.Frame(canvas)
+
+        btn_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=btn_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        def on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            return "break"
+
+        canvas.bind("<MouseWheel>", on_mousewheel)
+        btn_frame.bind("<MouseWheel>", on_mousewheel)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # ボタンを配置（1行に7個、幅を小さく）
+        cols = 7
+        for i, item in enumerate(keywords):
+            if len(item) == 2:
+                kid, name = item
+            else:
+                kid, name, _ = item
+
+            # 長い名前は短縮（8文字まで）
+            display_name = name[:8] + ".." if len(name) > 8 else name
+
+            btn = ttk.Button(
+                btn_frame,
+                text=display_name,
+                width=10,
+                style="Keyword.TButton",
+                command=lambda k=kid: self.toggle_trailer_keyword(k)
+            )
+            btn.grid(row=i//cols, column=i%cols, padx=1, pady=1, sticky="w")
+
+            if kid not in self.trailer_keyword_buttons:
+                self.trailer_keyword_buttons[kid] = []
+            self.trailer_keyword_buttons[kid].append(btn)
+
+            btn.bind("<MouseWheel>", on_mousewheel)
+
+    def toggle_trailer_keyword(self, keyword_id):
+        """予約作品用キーワードをトグル"""
+        if keyword_id in self.trailer_selected_keywords:
+            self.trailer_selected_keywords.remove(keyword_id)
+        elif len(self.trailer_selected_keywords) < 10:
+            self.trailer_selected_keywords.append(keyword_id)
+        self.update_trailer_keyword_display()
+        self.update_trailer_keyword_button_styles()
+
+    def clear_trailer_keywords(self):
+        """予約作品用キーワードをクリア"""
+        self.trailer_selected_keywords.clear()
+        self.update_trailer_keyword_display()
+        self.update_trailer_keyword_button_styles()
+
+    def update_trailer_keyword_display(self):
+        """予約作品用キーワード表示を更新"""
+        names = [get_keyword_name(k) for k in self.trailer_selected_keywords]
+        self.trailer_keyword_display.config(text=", ".join(names) if names else "(なし)")
+        self.trailer_keyword_label.config(text=f"選択中: {len(self.trailer_selected_keywords)}/10")
+
+    def update_trailer_keyword_button_styles(self):
+        """予約作品用キーワードボタンのスタイルを更新"""
+        for kid, btn_list in self.trailer_keyword_buttons.items():
+            style = "Selected.TButton" if kid in self.trailer_selected_keywords else "Keyword.TButton"
+            for btn in btn_list:
+                btn.configure(style=style)
+
+    def toggle_trailer_price(self):
+        """予約作品の価格入力の有効/無効を切り替え"""
+        if self.trailer_price_undecided_var.get():
+            self.trailer_price_entry.config(state="disabled")
+        else:
+            self.trailer_price_entry.config(state="normal")
+
+    def on_trailer_profile_change(self, event):
+        """予約作品タブでプロファイル選択時"""
+        idx = self.trailer_profile_combo.current()
+        if idx >= 0:
+            profile = self.profile_manager.profiles[idx]
+            self.trailer_current_profile_id = profile.profile_id
+            self.trailer_base_folder_combo['values'] = [Path(f).name for f in profile.folders]
+            self.trailer_base_folder_combo.set('')
+            self.trailer_series_combo['values'] = []
+            self.trailer_series_combo.set('')
+            self.trailer_product_combo['values'] = []
+            self.trailer_product_combo.set('')
+
+    def on_trailer_base_folder_change(self, event):
+        """予約作品タブでベースフォルダ選択時"""
+        idx = self.trailer_profile_combo.current()
+        base_idx = self.trailer_base_folder_combo.current()
+        if idx >= 0 and base_idx >= 0:
+            profile = self.profile_manager.profiles[idx]
+            self.trailer_current_base_folder = profile.folders[base_idx]
+            subfolders = get_subfolders(self.trailer_current_base_folder)
+            self.trailer_series_combo['values'] = subfolders
+            self.trailer_series_combo.set('')
+            self.trailer_product_combo['values'] = []
+            self.trailer_product_combo.set('')
+
+            self.trailer_selected_keywords = []
+            self.update_trailer_keyword_display()
+            self.update_trailer_keyword_button_styles()
+
+    def on_trailer_series_change(self, event):
+        """予約作品タブでシリーズ選択時"""
+        self.trailer_current_series_folder = self.trailer_series_combo.get()
+        if hasattr(self, 'trailer_current_base_folder') and self.trailer_current_series_folder:
+            series_path = Path(self.trailer_current_base_folder) / self.trailer_current_series_folder
+            subfolders = get_subfolders(str(series_path))
+            self.trailer_product_combo['values'] = subfolders
+            self.trailer_product_combo.set('')
+
+            # キーワード読み込み
+            if hasattr(self, 'trailer_current_profile_id'):
+                saved_keywords = self.keyword_storage.get_keywords_by_profile_series(
+                    self.trailer_current_profile_id, self.trailer_current_series_folder
+                )
+                self.trailer_selected_keywords = saved_keywords.copy() if saved_keywords else []
+                self.update_trailer_keyword_display()
+                self.update_trailer_keyword_button_styles()
+
+    def on_trailer_product_change(self, event):
+        """予約作品タブで商品フォルダ選択時"""
+        self.trailer_current_product_folder = self.trailer_product_combo.get()
+        self.load_trailer_product_data()
+
+    def load_trailer_product_data(self):
+        """予約作品のデータを読み込み"""
+        if not (hasattr(self, 'trailer_current_base_folder') and
+                hasattr(self, 'trailer_current_series_folder') and
+                hasattr(self, 'trailer_current_product_folder')):
+            return
+
+        if not (self.trailer_current_base_folder and self.trailer_current_series_folder and self.trailer_current_product_folder):
+            return
+
+        # タイトル自動生成
+        masked_name = mask_second_char(self.trailer_current_product_folder)
+        title = f"{self.trailer_current_series_folder} {masked_name}"
+        self.trailer_title_var.set(title)
+
+        # 商品パス
+        product_path = Path(self.trailer_current_base_folder) / self.trailer_current_series_folder / self.trailer_current_product_folder
+
+        # 説明文読み込み
+        description = read_description_file(product_path)
+        if description:
+            processed = process_description_template(
+                description,
+                self.trailer_current_series_folder,
+                product_path,
+                self.variable_manager
+            )
+            self.trailer_comment_text.delete("1.0", tk.END)
+            self.trailer_comment_text.insert("1.0", processed)
+
+        # 画像枚数
+        total = count_total_images_in_character_folders(product_path, min_images=50)
+        self.trailer_file_number_var.set(str(total) if total > 0 else "")
+
+        # パロディ詳細
+        self.trailer_parody_entries[0].delete(0, tk.END)
+        self.trailer_parody_entries[0].insert(0, self.trailer_current_product_folder)
+
+        char_folders = get_character_folders(product_path, min_images=50)
+        for i in range(3):
+            self.trailer_parody_entries[i+1].delete(0, tk.END)
+            if i < len(char_folders):
+                self.trailer_parody_entries[i+1].insert(0, char_folders[i])
+
+        # ふりがな生成
+        if self.profile_manager.openai_api_key:
+            original_title = f"{self.trailer_current_series_folder} {self.trailer_current_product_folder}"
+            success, result = self.furigana_converter.convert(original_title.replace("〇", ""))
+            if success:
+                self.trailer_title_ruby_var.set(result)
+
+        self.status_var.set(f"予約作品読み込み完了: {product_path}")
+
+    def save_trailer_product(self):
+        """予約作品データを保存"""
+        if not (hasattr(self, 'trailer_current_base_folder') and
+                hasattr(self, 'trailer_current_series_folder') and
+                hasattr(self, 'trailer_current_product_folder')):
+            messagebox.showwarning("警告", "商品フォルダを選択してください")
+            return
+
+        if not (self.trailer_current_base_folder and self.trailer_current_series_folder and self.trailer_current_product_folder):
+            messagebox.showwarning("警告", "商品フォルダを選択してください")
+            return
+
+        # 予約作品用データを保存
+        product_path = Path(self.trailer_current_base_folder) / self.trailer_current_series_folder / self.trailer_current_product_folder
+        info_path = product_path / "trailer_info.json"
+
+        data = self.get_trailer_data()
+        os.makedirs(product_path, exist_ok=True)
+        with open(info_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+        messagebox.showinfo("保存完了", f"予約作品データを保存しました:\n{info_path}")
+
+    def get_trailer_data(self):
+        """予約作品用のデータを取得"""
+        data = {
+            "title": self.trailer_title_var.get(),
+            "title_ruby": self.trailer_title_ruby_var.get(),
+            "article_type": self.get_combo_key(ARTICLE_TYPES, self.trailer_article_combo.current()),
+            "ai_generated_type": self.get_combo_key(AI_GENERATED_TYPES, self.trailer_ai_combo.current()),
+            "section": self.get_combo_key(SECTIONS, self.trailer_section_combo.current()),
+            "keyword_age": self.get_combo_key(KEYWORD_AGES, self.trailer_age_combo.current()),
+            "comment": self.trailer_comment_text.get("1.0", tk.END).strip(),
+            "file_number": self.trailer_file_number_var.get(),
+            "keywords": self.trailer_selected_keywords.copy(),
+            "parody_names": [e.get() for e in self.trailer_parody_entries],
+            "price_undecided": self.trailer_price_undecided_var.get(),
+            "price_retail": self.trailer_price_var.get() if not self.trailer_price_undecided_var.get() else "",
+            "monopoly_hope_flg": "1" if self.trailer_monopoly_var.get() else "0",
+            "drm_hope": self.get_combo_key(DRM_OPTIONS, self.trailer_drm_combo.current()),
+            "trailer_release_date_type": self.trailer_release_date_type_var.get(),  # 予告開始日指定
+            "release_undecided": self.trailer_release_undecided_var.get(),
+            "note": self.trailer_note_text.get("1.0", tk.END).strip(),
+        }
+
+        # パロディ
+        parody_idx = self.trailer_parody_combo.current()
+        if parody_idx > 0:
+            data["parody_type"] = PARODY_TYPES[parody_idx - 1][0]
+        else:
+            data["parody_type"] = ""
+
+        return data
+
+    def reload_trailer_product(self):
+        """予約作品データを再読み込み"""
+        if hasattr(self, 'trailer_current_product_folder') and self.trailer_current_product_folder:
+            self.load_trailer_product_data()
+            self.status_var.set("予約作品再読み込み完了")
+
+    def save_trailer_keywords_to_storage(self):
+        """予約作品用キーワードをストレージに保存"""
+        if not hasattr(self, 'trailer_current_profile_id'):
+            messagebox.showwarning("警告", "プロファイルを選択してください")
+            return
+        if not hasattr(self, 'trailer_current_series_folder') or not self.trailer_current_series_folder:
+            messagebox.showwarning("警告", "シリーズを選択してください")
+            return
+
+        self.keyword_storage.save_keywords_by_profile_series(
+            self.trailer_current_profile_id,
+            self.trailer_current_series_folder,
+            self.trailer_selected_keywords.copy()
+        )
+        messagebox.showinfo("保存完了", f"キーワードを保存しました\nシリーズ: {self.trailer_current_series_folder}")
+
+    def start_trailer_auto_input(self):
+        """予約作品の自動入力開始"""
+        if not hasattr(self, 'trailer_current_profile_id'):
+            messagebox.showwarning("警告", "プロファイルを選択してください")
+            return
+
+        if self.trailer_parody_combo.current() == 0:
+            messagebox.showwarning("警告", "パロディを選択してください")
+            return
+
+        data = self.get_trailer_data()
+
+        def run():
+            try:
+                self.status_var.set("ブラウザを起動中...")
+                from browser.form_filler import FanzaTrailerFormFiller
+
+                browser = AdsPowerBrowser(self.ads_api)
+                if not browser.start(self.trailer_current_profile_id):
+                    self.status_var.set("ブラウザ起動失敗")
+                    messagebox.showerror("エラー", "ブラウザの起動に失敗しました")
+                    return
+
+                self.status_var.set("予約作品フォーム入力中...")
+                filler = FanzaTrailerFormFiller(browser.get_driver(), callback=lambda m: self.status_var.set(m))
+                filler.navigate_to_form()
+                filler.fill_form(data)
+
+                self.status_var.set("完了！ブラウザで確認してください")
+                messagebox.showinfo("完了", "予約作品の自動入力が完了しました。\nブラウザで内容を確認してください。")
+            except Exception as e:
+                self.status_var.set(f"エラー: {e}")
+                messagebox.showerror("エラー", str(e))
+
+        threading.Thread(target=run, daemon=True).start()
+
     def create_settings_tab(self):
         c = self.COLORS
         # スクロール可能なキャンバス
@@ -807,6 +1380,7 @@ class FanzaAutoInputApp:
         # プロファイルをロード
         profiles = self.profile_manager.profiles
         self.profile_combo['values'] = [p.profile_name for p in profiles]
+        self.trailer_profile_combo['values'] = [p.profile_name for p in profiles]
 
         # 登録済みプロファイルをリストに表示
         self.refresh_registered_list()
@@ -1116,7 +1690,7 @@ class FanzaAutoInputApp:
         """キーワードボタンを作成（スクロール対応）"""
         c = self.COLORS
         # スクロール可能なキャンバス
-        canvas = tk.Canvas(parent, height=150, bg=c["bg"], highlightthickness=0)
+        canvas = tk.Canvas(parent, height=180, bg=c["bg"], highlightthickness=0)
         scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
         btn_frame = ttk.Frame(canvas)
 
@@ -1139,8 +1713,8 @@ class FanzaAutoInputApp:
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
-        # ボタンを配置（1行に8個）
-        cols = 8
+        # ボタンを配置（1行に7個、幅を小さく）
+        cols = 7
         for i, item in enumerate(keywords):
             if len(item) == 2:
                 kid, name = item
@@ -1148,14 +1722,17 @@ class FanzaAutoInputApp:
             else:
                 kid, name, is_recommend = item
 
+            # 長い名前は短縮（8文字まで）
+            display_name = name[:8] + ".." if len(name) > 8 else name
+
             btn = ttk.Button(
                 btn_frame,
-                text=name[:10],  # 長い名前は短縮
-                width=12,
+                text=display_name,
+                width=10,
                 style="Keyword.TButton",
                 command=lambda k=kid: self.toggle_keyword(k)
             )
-            btn.grid(row=i//cols, column=i%cols, padx=2, pady=2, sticky="w")
+            btn.grid(row=i//cols, column=i%cols, padx=1, pady=1, sticky="w")
 
             # ボタンの参照を保持（同じキーワードが複数タブにある場合に対応）
             if kid not in self.keyword_buttons:
@@ -1271,8 +1848,10 @@ class FanzaAutoInputApp:
             p = self.available_profiles[sel[0]]
             self.profile_manager.add_profile(p.get("user_id"), p.get("name"))
             self.refresh_registered_list()
-            # プロファイルコンボも更新
-            self.profile_combo['values'] = [p.profile_name for p in self.profile_manager.profiles]
+            # プロファイルコンボも更新（両タブ）
+            profile_names = [p.profile_name for p in self.profile_manager.profiles]
+            self.profile_combo['values'] = profile_names
+            self.trailer_profile_combo['values'] = profile_names
 
     def remove_profile(self):
         """プロファイルを削除"""
@@ -1281,7 +1860,10 @@ class FanzaAutoInputApp:
             profile = self.profile_manager.profiles[sel[0]]
             self.profile_manager.remove_profile(profile.profile_id)
             self.refresh_registered_list()
-            self.profile_combo['values'] = [p.profile_name for p in self.profile_manager.profiles]
+            # プロファイルコンボも更新（両タブ）
+            profile_names = [p.profile_name for p in self.profile_manager.profiles]
+            self.profile_combo['values'] = profile_names
+            self.trailer_profile_combo['values'] = profile_names
 
     def on_registered_select(self, event):
         """登録済みプロファイル選択時"""

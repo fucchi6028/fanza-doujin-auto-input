@@ -437,6 +437,137 @@ class FanzaFormFiller:
             return False
 
 
+class FanzaTrailerFormFiller(FanzaFormFiller):
+    """FANZA同人 予約作品（予告）フォーム自動入力クラス"""
+
+    FORM_URL = "https://dojin.dmm.co.jp/addtrailerproduct"
+
+    def navigate_to_form(self):
+        """予約作品登録フォームページに移動"""
+        self._report("予約作品フォームページを開いています...")
+        self.driver.get(self.FORM_URL)
+        time.sleep(3)
+        self._report("予約作品フォームページを開きました")
+
+    def step7_fill_sales_info(self, data: dict):
+        """ステップ7: 販売情報を入力（予約作品用）"""
+        self._report("ステップ7: 販売情報を入力中（予約作品）...")
+
+        # 販売価格未定チェック
+        price_undecided = data.get("price_undecided", True)
+        if price_undecided:
+            # 未定チェックボックスを選択
+            try:
+                # チェックボックスを探す（price_undecided または price_retail_undecided）
+                checkbox = self.driver.find_element(
+                    By.CSS_SELECTOR, "input[name='price_undecided'], input[name='price_retail_undecided'], input[type='checkbox'][id*='price']"
+                )
+                if not checkbox.is_selected():
+                    self.driver.execute_script("arguments[0].click();", checkbox)
+                    time.sleep(0.3)
+                self._report("販売価格: 未定")
+            except Exception as e:
+                # ラジオボタンの場合
+                if self._click_radio("price_undecided", "1"):
+                    self._report("販売価格: 未定")
+                else:
+                    self._report(f"価格未定設定エラー: {e}")
+        else:
+            # 価格を入力
+            if data.get("price_retail"):
+                self._fill_input("price_retail", data["price_retail"])
+                self._report(f"販売価格入力完了: {data['price_retail']}円")
+
+        # 専売希望
+        if data.get("monopoly_hope_flg"):
+            self._click_radio("monopoly_hope_flg", data["monopoly_hope_flg"])
+
+        # 作品保護
+        if data.get("drm_hope"):
+            self._click_radio("drm_hope", data["drm_hope"])
+
+        self._report("販売情報入力完了（予約作品）")
+        return True
+
+    def step8_fill_other_info(self, data: dict):
+        """ステップ8: その他の情報を入力（予約作品用）"""
+        self._report("ステップ8: その他の情報を入力中（予約作品）...")
+
+        # 予告開始日指定
+        trailer_release_date_type = data.get("trailer_release_date_type", "1")
+        if self._click_radio("trailer_release_date_type", trailer_release_date_type):
+            self._report(f"予告開始日: {'最短で公開' if trailer_release_date_type == '1' else '日付を指定して公開'}")
+
+        # 配信予定未定チェック
+        release_undecided = data.get("release_undecided", True)
+        if release_undecided:
+            try:
+                # 未定チェックボックスを探す
+                checkbox = self.driver.find_element(
+                    By.CSS_SELECTOR, "input[name='release_undecided'], input[name='release_season_undecided'], input[type='checkbox'][id*='release']"
+                )
+                if not checkbox.is_selected():
+                    self.driver.execute_script("arguments[0].click();", checkbox)
+                    time.sleep(0.3)
+                self._report("配信予定: 未定")
+            except Exception as e:
+                # ラジオボタンの場合
+                if self._click_radio("release_undecided", "1"):
+                    self._report("配信予定: 未定")
+                else:
+                    self._report(f"配信予定未定設定エラー: {e}")
+
+        # 作品修正対応
+        if data.get("revision_flg"):
+            self._click_radio("revision_flg", data["revision_flg"])
+
+        # 通信欄
+        if data.get("note"):
+            self._fill_textarea("note", data["note"])
+            self._report("通信欄入力完了")
+
+        self._report("その他の情報入力完了（予約作品）")
+        return True
+
+    def fill_form(self, data: dict):
+        """予約作品フォームに一括入力"""
+        self._report("=== 予約作品自動入力開始 ===")
+
+        try:
+            # ステップ1: 作品形式
+            if not self.step1_select_article_type(data.get("article_type", "cg")):
+                return False
+
+            # ステップ2: AI利用の有無
+            if not self.step2_select_ai_type(data.get("ai_generated_type", "2")):
+                return False
+
+            # ステップ3: 基本情報
+            self.step3_fill_basic_info(data)
+
+            # ステップ4: 作品内容
+            self.step4_fill_content_info(data)
+
+            # ステップ5: パロディ情報
+            self.step5_fill_parody_info(data)
+
+            # ステップ6: キーワード
+            self.step6_select_keywords(data.get("keywords", []))
+
+            # ステップ7: 販売情報（予約作品用）
+            self.step7_fill_sales_info(data)
+
+            # ステップ8: その他（予約作品用）
+            self.step8_fill_other_info(data)
+
+            self._report("=== 予約作品自動入力完了 ===")
+            return True
+
+        except Exception as e:
+            self._report(f"エラーが発生しました: {e}")
+            return False
+
+
 # テスト用
 if __name__ == "__main__":
     print("このモジュールはmain.pyから使用してください")
