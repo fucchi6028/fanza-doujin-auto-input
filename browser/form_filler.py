@@ -936,6 +936,21 @@ class FanzaFormalRegistrationFiller(FanzaFormFiller):
         "⁓": "~",  # ⁓ SWUNG DASH
     }
 
+    # ハート系の絵文字は FANZA 側で「(はーと)」というテキストに変換されて
+    # 表示されるため、比較時は絵文字・テキストの双方を同じトークンへ寄せる。
+    _HEART_CHARS = (
+        "♡",   # U+2661 WHITE HEART SUIT
+        "♥",   # U+2665 BLACK HEART SUIT
+        "❤",   # U+2764 HEAVY BLACK HEART
+        "❤️",  # U+2764 U+FE0F (絵文字表示指定付き)
+        "💕",  # U+1F495 TWO HEARTS
+        "💗",  # U+1F497 GROWING HEART
+        "💓",  # U+1F493 BEATING HEART
+        "💖",  # U+1F496 SPARKLING HEART
+        "💛", "💙", "💜", "🧡", "🖤", "🤍", "🤎",  # 各色ハート
+    )
+    _HEART_TOKEN = "(はーと)"
+
     @classmethod
     def _normalize_title(cls, text: str) -> str:
         """タイトル比較用に正規化する。
@@ -952,11 +967,15 @@ class FanzaFormalRegistrationFiller(FanzaFormFiller):
         # 波ダッシュ／チルダ系を "~" に統一
         for c, n in cls._WAVE_CHARS.items():
             text = text.replace(c, n)
-        # 全角英数字・記号を半角へ（！-～ の範囲を 0x20 シフト）
+        # 全角英数字・記号を半角へ（！-～ の範囲を 0x20 シフト）。
+        # これで全角括弧 （はーと） も半角 (はーと) に揃う。
         text = "".join(
             chr(ord(ch) - 0xFEE0) if "！" <= ch <= "～" else ch
             for ch in text
         )
+        # ハート絵文字を FANZA 表示と同じ「(はーと)」テキストへ寄せる
+        for c in cls._HEART_CHARS:
+            text = text.replace(c, cls._HEART_TOKEN)
         return " ".join(text.split()).strip()
 
     def _accept_any_alert(self):
@@ -1002,19 +1021,28 @@ class FanzaFormalRegistrationFiller(FanzaFormFiller):
         self._accept_any_alert()
 
     @staticmethod
-    def _trailing_number(text: str) -> str:
-        """タイトル末尾側の巻数などの数字を取り出す（無ければ空文字）。"""
-        nums = re.findall(r"\d+", text or "")
-        return nums[-1] if nums else ""
+    def _split_volume(text: str):
+        """空白除去済みタイトルを (基幹タイトル, 巻数) に分割する。
+
+        末尾の巻数表現を吸収するため、次のいずれの表記も同じ巻数として扱う:
+        「Vol.9」「Vol. 9」「Vol9」「09」「9」（丸数字は正規化で半角数字化済み）。
+        巻数はゼロ埋め差（09 と 9）を吸収するため int で返す。巻数が無ければ
+        (元テキスト, None)。
+        """
+        m = re.search(r"(?i)(?:vol\.?)?(\d+)$", text or "")
+        if not m:
+            return text, None
+        return text[: m.start()], int(m.group(1))
 
     def _titles_match(self, target: str, candidate: str) -> bool:
         """正規化済みタイトル同士の一致判定。
 
         巻数の表記差（「ユーフォニアム②」＝スペース無し vs 登録側
-        「ユーフォニアム 2」＝スペース有り）を吸収するため、比較時は空白を
-        全除去する。ただし番号（巻数）が異なる場合は取り違え防止のため必ず
-        不一致にし、番号が同じ（または両方に番号が無い）場合はシリーズ名の
-        表記揺れを吸収するため完全一致に加えて包含関係も一致とみなす。
+        「ユーフォニアム 2」＝スペース有り、「09」vs「Vol.9」等）を吸収するため、
+        比較時は空白を全除去し末尾の巻数表現を分離する。巻数が数値として
+        異なる場合は取り違え防止のため必ず不一致にし、巻数が同じ（または両方に
+        巻数が無い）場合はシリーズ名の表記揺れを吸収するため完全一致に加えて
+        包含関係も一致とみなす。
         """
         if not target or not candidate:
             return False
@@ -1025,9 +1053,16 @@ class FanzaFormalRegistrationFiller(FanzaFormFiller):
             return False
         if ct == cc:
             return True
-        if self._trailing_number(ct) != self._trailing_number(cc):
+        # 末尾の巻数を数値として比較（09==9、Vol.9==9）。片方だけ巻数が有る／
+        # 数値が異なる場合は取り違え防止で不一致。
+        bt, nt = self._split_volume(ct)
+        bc, nc = self._split_volume(cc)
+        if nt != nc:
             return False
-        return ct in cc or cc in ct
+        # 巻数が一致（または両方巻数無し）ならシリーズ名の表記揺れを包含で吸収
+        base_t = bt if nt is not None else ct
+        base_c = bc if nc is not None else cc
+        return base_t == base_c or base_t in base_c or base_c in base_t
 
     def _titles_for_article_id(self, article_id: str):
         """作品IDに紐づくタイトル候補（画像alt・詳細リンク文言）を集める。
