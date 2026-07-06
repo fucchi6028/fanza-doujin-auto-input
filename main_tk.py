@@ -21,6 +21,8 @@ from config.variable_manager import (
     read_description_file,
     count_total_images_in_character_folders,
     count_all_images_in_product,
+    count_images_in_zip_folder,
+    count_images_in_masked_zip,
     get_character_folders,
 )
 from config.keywords_data import (
@@ -69,13 +71,6 @@ DRM_OPTIONS = [
     ("none", "なし"),
     ("protect", "プロテクトサービス"),
     ("sdrm", "ソーシャルDRM (β版)"),
-]
-
-CAMPAIGN_AUTO_JOIN_OPTIONS = [
-    ("0", "発売からすぐに自動参加する"),
-    ("30", "発売から30日後に自動参加する"),
-    ("90", "発売から90日後に自動参加する"),
-    ("null", "自動参加しない"),
 ]
 
 
@@ -201,7 +196,7 @@ class FanzaAutoInputApp:
         # 予約作品用UI変数
         self.trailer_title_var = tk.StringVar()
         self.trailer_title_ruby_var = tk.StringVar()
-        self.trailer_price_undecided_var = tk.BooleanVar(value=True)  # 販売価格未定（デフォルトON）
+        self.trailer_price_undecided_var = tk.BooleanVar(value=False)  # 販売価格未定（デフォルトOFF：設定価格を入力）
         self.trailer_price_var = tk.StringVar(value="800")
         self.trailer_monopoly_var = tk.BooleanVar(value=False)
         self.trailer_file_number_var = tk.StringVar()
@@ -209,6 +204,13 @@ class FanzaAutoInputApp:
         self.trailer_release_undecided_var = tk.BooleanVar(value=True)  # 配信予定未定（デフォルトON）
         self.trailer_selected_keywords = []
         self.trailer_keyword_buttons = {}
+
+        # 配信申請用UI変数
+        self.formal_campaign_auto_var = tk.BooleanVar(value=True)    # 販売からすぐに自動参加する
+        self.formal_discount_enabled_var = tk.BooleanVar(value=True)  # 割引設定を設定する
+        self.formal_file_number_var = tk.StringVar()                 # 枚数（伏字ZIPから再取得）
+        self.formal_release_date_type_var = tk.StringVar(value="1")  # 配信開始日指定（デフォルト: 最短で公開）
+        self.formal_current_profile_id = None
 
         self.create_ui()
         self.load_initial_data()
@@ -399,6 +401,11 @@ class FanzaAutoInputApp:
         self.notebook.add(self.trailer_frame, text="予約作品入力")
         self.create_trailer_input_tab()
 
+        # 配信申請タブ
+        self.formal_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.formal_frame, text="配信申請")
+        self.create_formal_registration_tab()
+
         # 設定タブ
         self.settings_frame = ttk.Frame(self.notebook)
         self.notebook.add(self.settings_frame, text="設定")
@@ -504,23 +511,23 @@ class FanzaAutoInputApp:
 
         # AI利用
         ttk.Label(basic_frame, text="AI利用:").grid(row=2, column=2, sticky=tk.W, padx=5)
-        self.ai_combo = ttk.Combobox(basic_frame, width=35, state="readonly")
+        self.ai_combo = ttk.Combobox(basic_frame, width=35, state="disabled")
         self.ai_combo['values'] = [v for k, v in AI_GENERATED_TYPES]
         self.ai_combo.current(1)  # デフォルト: AIで作品を生成している
         self.ai_combo.grid(row=2, column=3, sticky=tk.W, padx=5, pady=2)
 
-        # 作品区分
+        # 作品区分（固定: 男性向け）
         ttk.Label(basic_frame, text="作品区分:").grid(row=3, column=0, sticky=tk.W, padx=5)
-        self.section_combo = ttk.Combobox(basic_frame, width=15, state="readonly")
+        self.section_combo = ttk.Combobox(basic_frame, width=15, state="disabled")
         self.section_combo['values'] = [v for k, v in SECTIONS]
-        self.section_combo.current(0)  # デフォルト: 男性向け
+        self.section_combo.current(0)  # 固定: 男性向け
         self.section_combo.grid(row=3, column=1, sticky=tk.W, padx=5, pady=2)
 
-        # 年齢指定
+        # 年齢指定（固定: 成人向け）
         ttk.Label(basic_frame, text="年齢指定:").grid(row=3, column=2, sticky=tk.W, padx=5)
-        self.age_combo = ttk.Combobox(basic_frame, width=15, state="readonly")
+        self.age_combo = ttk.Combobox(basic_frame, width=15, state="disabled")
         self.age_combo['values'] = [v for k, v in KEYWORD_AGES]
-        self.age_combo.current(0)  # デフォルト: 成人向け
+        self.age_combo.current(0)  # 固定: 成人向け
         self.age_combo.grid(row=3, column=3, sticky=tk.W, padx=5, pady=2)
 
         # === 作品内容セクション ===
@@ -595,6 +602,7 @@ class FanzaAutoInputApp:
         self.keyword_label.pack(side=tk.LEFT)
 
         ttk.Button(keyword_status_frame, text="キーワード保存", command=self.save_keywords_to_storage, style="Success.TButton").pack(side=tk.RIGHT, padx=5)
+        ttk.Button(keyword_status_frame, text="ページから取得", command=self.fetch_keywords_from_page).pack(side=tk.RIGHT, padx=5)
         ttk.Button(keyword_status_frame, text="クリア", command=self.clear_keywords).pack(side=tk.RIGHT, padx=5)
 
         self.keyword_display = ttk.Label(keyword_frame, text="", wraplength=900, foreground=c["success"])
@@ -637,10 +645,7 @@ class FanzaAutoInputApp:
         ttk.Checkbutton(sales_frame, text="クーポン参加", variable=self.coupon_var).grid(row=1, column=4, padx=20)
 
         ttk.Label(sales_frame, text="自動参加:").grid(row=2, column=0, sticky=tk.W, padx=5)
-        self.auto_join_combo = ttk.Combobox(sales_frame, width=30, state="readonly")
-        self.auto_join_combo['values'] = [v for k, v in CAMPAIGN_AUTO_JOIN_OPTIONS]
-        self.auto_join_combo.current(0)  # デフォルト: 発売からすぐに自動参加する
-        self.auto_join_combo.grid(row=2, column=1, columnspan=2, sticky=tk.W, padx=5, pady=2)
+        ttk.Label(sales_frame, text="発売からすぐに自動参加する").grid(row=2, column=1, columnspan=2, sticky=tk.W, padx=5, pady=2)
 
         # 割引設定
         ttk.Label(sales_frame, text="割引設定:").grid(row=3, column=0, sticky=tk.W, padx=5)
@@ -781,23 +786,23 @@ class FanzaAutoInputApp:
 
         # AI利用
         ttk.Label(basic_frame, text="AI利用:").grid(row=2, column=2, sticky=tk.W, padx=5)
-        self.trailer_ai_combo = ttk.Combobox(basic_frame, width=35, state="readonly")
+        self.trailer_ai_combo = ttk.Combobox(basic_frame, width=35, state="disabled")
         self.trailer_ai_combo['values'] = [v for k, v in AI_GENERATED_TYPES]
         self.trailer_ai_combo.current(1)  # デフォルト: AIで作品を生成している
         self.trailer_ai_combo.grid(row=2, column=3, sticky=tk.W, padx=5, pady=2)
 
-        # 作品区分
+        # 作品区分（固定: 男性向け）
         ttk.Label(basic_frame, text="作品区分:").grid(row=3, column=0, sticky=tk.W, padx=5)
-        self.trailer_section_combo = ttk.Combobox(basic_frame, width=15, state="readonly")
+        self.trailer_section_combo = ttk.Combobox(basic_frame, width=15, state="disabled")
         self.trailer_section_combo['values'] = [v for k, v in SECTIONS]
-        self.trailer_section_combo.current(0)  # デフォルト: 男性向け
+        self.trailer_section_combo.current(0)  # 固定: 男性向け
         self.trailer_section_combo.grid(row=3, column=1, sticky=tk.W, padx=5, pady=2)
 
-        # 年齢指定
+        # 年齢指定（固定: 成人向け）
         ttk.Label(basic_frame, text="年齢指定:").grid(row=3, column=2, sticky=tk.W, padx=5)
-        self.trailer_age_combo = ttk.Combobox(basic_frame, width=15, state="readonly")
+        self.trailer_age_combo = ttk.Combobox(basic_frame, width=15, state="disabled")
         self.trailer_age_combo['values'] = [v for k, v in KEYWORD_AGES]
-        self.trailer_age_combo.current(0)  # デフォルト: 成人向け
+        self.trailer_age_combo.current(0)  # 固定: 成人向け
         self.trailer_age_combo.grid(row=3, column=3, sticky=tk.W, padx=5, pady=2)
 
         # === 作品内容セクション ===
@@ -871,6 +876,7 @@ class FanzaAutoInputApp:
         self.trailer_keyword_label.pack(side=tk.LEFT)
 
         ttk.Button(keyword_status_frame, text="キーワード保存", command=self.save_trailer_keywords_to_storage, style="Success.TButton").pack(side=tk.RIGHT, padx=5)
+        ttk.Button(keyword_status_frame, text="ページから取得", command=self.fetch_trailer_keywords_from_page).pack(side=tk.RIGHT, padx=5)
         ttk.Button(keyword_status_frame, text="クリア", command=self.clear_trailer_keywords).pack(side=tk.RIGHT, padx=5)
 
         self.trailer_keyword_display = ttk.Label(keyword_frame, text="", wraplength=900, foreground=c["success"])
@@ -900,7 +906,7 @@ class FanzaAutoInputApp:
         ttk.Label(sales_frame, text="販売価格:").grid(row=0, column=0, sticky=tk.W, padx=5)
         ttk.Checkbutton(sales_frame, text="未定", variable=self.trailer_price_undecided_var,
                        command=self.toggle_trailer_price).grid(row=0, column=1, sticky=tk.W, padx=5)
-        self.trailer_price_entry = ttk.Entry(sales_frame, textvariable=self.trailer_price_var, width=15, state="disabled")
+        self.trailer_price_entry = ttk.Entry(sales_frame, textvariable=self.trailer_price_var, width=15, state="normal")
         self.trailer_price_entry.grid(row=0, column=2, sticky=tk.W, padx=5, pady=2)
         ttk.Label(sales_frame, text="円（税抜）").grid(row=0, column=3, sticky=tk.W)
 
@@ -1108,13 +1114,14 @@ class FanzaAutoInputApp:
             self.trailer_comment_text.delete("1.0", tk.END)
             self.trailer_comment_text.insert("1.0", processed)
 
-        # 画像枚数
-        total = count_total_images_in_character_folders(product_path, min_images=50)
+        # 画像枚数（キャラクターフォルダから取得）
+        total = count_total_images_in_character_folders(product_path)
         self.trailer_file_number_var.set(str(total) if total > 0 else "")
 
-        # パロディ詳細
+        # パロディ詳細（スペース以降は除外。例:「タイトル名 No.2」→「タイトル名」）
         self.trailer_parody_entries[0].delete(0, tk.END)
-        self.trailer_parody_entries[0].insert(0, self.trailer_current_product_folder)
+        parody_title = self.trailer_current_product_folder.replace("　", " ").split(" ")[0]
+        self.trailer_parody_entries[0].insert(0, parody_title)
 
         char_folders = get_character_folders(product_path, min_images=50)
         for i in range(3):
@@ -1122,12 +1129,11 @@ class FanzaAutoInputApp:
             if i < len(char_folders):
                 self.trailer_parody_entries[i+1].insert(0, char_folders[i])
 
-        # ふりがな生成
-        if self.profile_manager.openai_api_key:
-            original_title = f"{self.trailer_current_series_folder} {self.trailer_current_product_folder}"
-            success, result = self.furigana_converter.convert(original_title.replace("〇", ""))
-            if success:
-                self.trailer_title_ruby_var.set(result)
+        # ふりがな生成（シリーズ名 + 商品フォルダ名）
+        original_title = f"{self.trailer_current_series_folder} {self.trailer_current_product_folder}"
+        success, result = self.furigana_converter.convert(original_title.replace("〇", ""))
+        if success:
+            self.trailer_title_ruby_var.set(result)
 
         self.status_var.set(f"予約作品読み込み完了: {product_path}")
 
@@ -1243,6 +1249,296 @@ class FanzaAutoInputApp:
 
         threading.Thread(target=run, daemon=True).start()
 
+    def create_formal_registration_tab(self):
+        """配信申請タブを作成"""
+        c = self.COLORS
+        # スクロール可能なキャンバス
+        canvas = tk.Canvas(self.formal_frame, bg=c["bg"], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self.formal_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        def on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        canvas.bind("<MouseWheel>", on_mousewheel)
+        scrollable_frame.bind("<MouseWheel>", on_mousewheel)
+
+        def bind_mousewheel(widget):
+            widget.bind("<MouseWheel>", on_mousewheel)
+            for child in widget.winfo_children():
+                bind_mousewheel(child)
+        scrollable_frame.bind("<Map>", lambda e: bind_mousewheel(scrollable_frame))
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # === 説明セクション ===
+        info_frame = ttk.LabelFrame(scrollable_frame, text="配信申請について", padding=10)
+        info_frame.pack(fill=tk.X, padx=5, pady=5)
+        ttk.Label(
+            info_frame,
+            text=(
+                "予告作品を出品するには配信申請（本登録）が必要です。\n"
+                "AdsPowerで対象プロファイルのブラウザを起動し、下で作品（プロファイル→\n"
+                "ベースフォルダ→シリーズ→商品フォルダ）を選んで「配信申請の自動入力」を押してください。\n"
+                "作品管理ページから伏字タイトルで該当作品の配信申請ページを自動で開き、\n"
+                "枚数（伏字ZIPから自動再取得）・キャンペーン自動参加・割引設定・配信開始日（最短で公開）を\n"
+                "入力します（申請の送信は手動で行ってください）。\n"
+                "※作品を選ばない場合は、すでに開いている配信申請ページに入力します。"
+            ),
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, padx=5, pady=2)
+
+        # === 作品選択セクション ===
+        select_frame = ttk.LabelFrame(scrollable_frame, text="作品選択", padding=10)
+        select_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        ttk.Label(select_frame, text="プロファイル:").grid(row=0, column=0, sticky=tk.W, padx=5)
+        self.formal_profile_combo = ttk.Combobox(select_frame, width=25, state="readonly")
+        self.formal_profile_combo.grid(row=0, column=1, padx=5, pady=2)
+        self.formal_profile_combo.bind("<<ComboboxSelected>>", self.on_formal_profile_change)
+
+        # ベースフォルダ選択
+        ttk.Label(select_frame, text="ベースフォルダ:").grid(row=0, column=2, sticky=tk.W, padx=5)
+        self.formal_base_folder_combo = ttk.Combobox(select_frame, width=25, state="readonly")
+        self.formal_base_folder_combo.grid(row=0, column=3, padx=5, pady=2)
+        self.formal_base_folder_combo.bind("<<ComboboxSelected>>", self.on_formal_base_folder_change)
+
+        # シリーズ選択
+        ttk.Label(select_frame, text="シリーズ:").grid(row=1, column=0, sticky=tk.W, padx=5)
+        self.formal_series_combo = ttk.Combobox(select_frame, width=25, state="readonly")
+        self.formal_series_combo.grid(row=1, column=1, padx=5, pady=2)
+        self.formal_series_combo.bind("<<ComboboxSelected>>", self.on_formal_series_change)
+
+        # 商品フォルダ選択
+        ttk.Label(select_frame, text="商品フォルダ:").grid(row=1, column=2, sticky=tk.W, padx=5)
+        self.formal_product_combo = ttk.Combobox(select_frame, width=25, state="readonly")
+        self.formal_product_combo.grid(row=1, column=3, padx=5, pady=2)
+        self.formal_product_combo.bind("<<ComboboxSelected>>", self.on_formal_product_change)
+
+        # 枚数（伏字ZIPから自動再取得）
+        ttk.Label(select_frame, text="枚数:").grid(row=2, column=0, sticky=tk.W, padx=5)
+        ttk.Entry(select_frame, textvariable=self.formal_file_number_var, width=12, state="readonly").grid(
+            row=2, column=1, sticky=tk.W, padx=5, pady=2
+        )
+        ttk.Button(select_frame, text="枚数を再取得", command=self.fetch_formal_file_number).grid(
+            row=2, column=2, sticky=tk.W, padx=5, pady=2
+        )
+
+        # === キャンペーン・割引設定セクション ===
+        campaign_frame = ttk.LabelFrame(scrollable_frame, text="キャンペーン・割引設定", padding=10)
+        campaign_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        # キャンペーン自動参加
+        ttk.Label(campaign_frame, text="自動参加:").grid(row=0, column=0, sticky=tk.W, padx=5)
+        ttk.Checkbutton(
+            campaign_frame,
+            text="販売からすぐに自動参加する",
+            variable=self.formal_campaign_auto_var,
+        ).grid(row=0, column=1, columnspan=3, sticky=tk.W, padx=5, pady=2)
+
+        # 割引設定
+        ttk.Label(campaign_frame, text="割引設定:").grid(row=1, column=0, sticky=tk.W, padx=5)
+        ttk.Checkbutton(
+            campaign_frame,
+            text="設定する",
+            variable=self.formal_discount_enabled_var,
+        ).grid(row=1, column=1, sticky=tk.W, padx=5)
+
+        discount_detail_frame = ttk.Frame(campaign_frame)
+        discount_detail_frame.grid(row=1, column=2, columnspan=3, sticky=tk.W, padx=5)
+
+        ttk.Label(discount_detail_frame, text="実施期間:").pack(side=tk.LEFT)
+        self.formal_discount_days_combo = ttk.Combobox(discount_detail_frame, width=5, state="readonly")
+        self.formal_discount_days_combo['values'] = [str(i) for i in range(1, 29)]
+        self.formal_discount_days_combo.current(27)  # デフォルト: 28日（一番下）
+        self.formal_discount_days_combo.pack(side=tk.LEFT, padx=2)
+        ttk.Label(discount_detail_frame, text="日").pack(side=tk.LEFT, padx=(0, 15))
+
+        ttk.Label(discount_detail_frame, text="割引率:").pack(side=tk.LEFT)
+        self.formal_discount_rate_combo = ttk.Combobox(discount_detail_frame, width=5, state="readonly")
+        self.formal_discount_rate_combo['values'] = ["10", "15", "20", "25", "30", "35", "40", "45", "50", "55", "60", "65", "70", "75", "80", "85", "90", "95"]
+        self.formal_discount_rate_combo.current(14)  # デフォルト: 80%
+        self.formal_discount_rate_combo.pack(side=tk.LEFT, padx=2)
+        ttk.Label(discount_detail_frame, text="%").pack(side=tk.LEFT)
+
+        # 配信開始日指定（割引設定の下）
+        ttk.Label(campaign_frame, text="配信開始日:").grid(row=2, column=0, sticky=tk.W, padx=5)
+        formal_release_frame = ttk.Frame(campaign_frame)
+        formal_release_frame.grid(row=2, column=1, columnspan=4, sticky=tk.W, padx=5, pady=2)
+        ttk.Radiobutton(formal_release_frame, text="最短で公開", variable=self.formal_release_date_type_var, value="1").pack(side=tk.LEFT)
+        ttk.Radiobutton(formal_release_frame, text="日付を指定して公開", variable=self.formal_release_date_type_var, value="2").pack(side=tk.LEFT, padx=10)
+
+        # === 実行ボタン ===
+        btn_frame = ttk.Frame(scrollable_frame)
+        btn_frame.pack(fill=tk.X, padx=5, pady=15)
+        ttk.Button(
+            btn_frame,
+            text="配信申請の自動入力",
+            command=self.start_formal_registration_input,
+            style="Accent.TButton",
+        ).pack(side=tk.LEFT, padx=5)
+
+    def on_formal_profile_change(self, event):
+        """配信申請タブでプロファイル選択時"""
+        idx = self.formal_profile_combo.current()
+        if idx >= 0:
+            profile = self.profile_manager.profiles[idx]
+            self.formal_current_profile_id = profile.profile_id
+            self.formal_base_folder_combo['values'] = [Path(f).name for f in profile.folders]
+            self.formal_base_folder_combo.set('')
+            self.formal_series_combo['values'] = []
+            self.formal_series_combo.set('')
+            self.formal_product_combo['values'] = []
+            self.formal_product_combo.set('')
+            self.formal_file_number_var.set('')
+
+    def on_formal_base_folder_change(self, event):
+        """配信申請タブでベースフォルダ選択時"""
+        idx = self.formal_profile_combo.current()
+        base_idx = self.formal_base_folder_combo.current()
+        if idx >= 0 and base_idx >= 0:
+            profile = self.profile_manager.profiles[idx]
+            self.formal_current_base_folder = profile.folders[base_idx]
+            self.formal_series_combo['values'] = get_subfolders(self.formal_current_base_folder)
+            self.formal_series_combo.set('')
+            self.formal_product_combo['values'] = []
+            self.formal_product_combo.set('')
+            self.formal_file_number_var.set('')
+
+    def on_formal_series_change(self, event):
+        """配信申請タブでシリーズ選択時"""
+        self.formal_current_series_folder = self.formal_series_combo.get()
+        if getattr(self, 'formal_current_base_folder', None) and self.formal_current_series_folder:
+            series_path = Path(self.formal_current_base_folder) / self.formal_current_series_folder
+            self.formal_product_combo['values'] = get_subfolders(str(series_path))
+            self.formal_product_combo.set('')
+            self.formal_file_number_var.set('')
+
+    def on_formal_product_change(self, event):
+        """配信申請タブで商品フォルダ選択時"""
+        self.formal_current_product_folder = self.formal_product_combo.get()
+        self.fetch_formal_file_number()
+
+    def _get_formal_product_path(self):
+        """配信申請タブで選択中の商品フォルダのパスを返す（未選択ならNone）"""
+        base = getattr(self, 'formal_current_base_folder', None)
+        series = getattr(self, 'formal_current_series_folder', None)
+        product = getattr(self, 'formal_current_product_folder', None)
+        if base and series and product:
+            return Path(base) / series / product
+        return None
+
+    def fetch_formal_file_number(self):
+        """伏字ZIPから枚数を再取得して表示・保持する"""
+        product_path = self._get_formal_product_path()
+        if product_path is None:
+            self.formal_file_number_var.set('')
+            return 0
+
+        masked_title = f"{self.formal_current_series_folder} {mask_second_char(self.formal_current_product_folder)}"
+        total = count_images_in_masked_zip(product_path, masked_title)
+        self.formal_file_number_var.set(str(total) if total > 0 else "")
+        if total > 0:
+            self.status_var.set(f"枚数を再取得しました: {total}枚")
+        else:
+            self.status_var.set("伏字ZIPが見つからず枚数を取得できませんでした")
+        return total
+
+    def start_formal_registration_input(self):
+        """選択作品の配信申請ページを作品管理ページから自動で開いて入力"""
+        if not getattr(self, "formal_current_profile_id", None):
+            messagebox.showwarning("警告", "プロファイルを選択してください")
+            return
+
+        # 作品未選択なら、自動オープンできない旨を確認（開いているページに入力するフォールバック）
+        if not (getattr(self, "formal_current_series_folder", None) and getattr(self, "formal_current_product_folder", None)):
+            if not messagebox.askyesno(
+                "作品が未選択です",
+                "シリーズ・商品フォルダが選択されていません。\n"
+                "作品を選択すると、作品管理ページから配信申請ボタンを自動で押して開きます。\n\n"
+                "このまま「すでに開いている配信申請ページ」に入力しますか？",
+            ):
+                return
+
+        # 枚数を伏字ZIPから自動再取得して最新化
+        self.fetch_formal_file_number()
+
+        # 作品を選択していれば、伏字タイトルで配信申請ページを自動オープンできる
+        masked_title = ""
+        masked_product = ""
+        if getattr(self, "formal_current_series_folder", None) and getattr(self, "formal_current_product_folder", None):
+            masked_product = mask_second_char(self.formal_current_product_folder)
+            masked_title = f"{self.formal_current_series_folder} {masked_product}"
+
+        data = {
+            "campaign_auto_join": self.formal_campaign_auto_var.get(),
+            "discount_enabled": self.formal_discount_enabled_var.get(),
+            "discount_days": self.formal_discount_days_combo.get(),
+            "discount_rate": self.formal_discount_rate_combo.get(),
+            "file_number": self.formal_file_number_var.get(),
+            "release_date_type": self.formal_release_date_type_var.get(),
+            "masked_title": masked_title,
+            "masked_product": masked_product,
+        }
+
+        def run():
+            try:
+                self.status_var.set("ブラウザに接続中...")
+                from browser.form_filler import FanzaFormalRegistrationFiller
+
+                browser = AdsPowerBrowser(self.ads_api)
+                if not browser.start(self.formal_current_profile_id):
+                    self.status_var.set("ブラウザ接続失敗")
+                    messagebox.showerror(
+                        "エラー",
+                        "ブラウザに接続できませんでした。\n"
+                        "AdsPowerで対象プロファイルのブラウザを起動し、\n"
+                        "配信申請ページ（本登録フォーム）を開いてから\n"
+                        "再度お試しください。",
+                    )
+                    return
+
+                self.status_var.set("配信申請フォーム入力中...")
+                filler = FanzaFormalRegistrationFiller(
+                    browser.get_driver(), callback=lambda m: self.status_var.set(m)
+                )
+                result = filler.fill_campaign_discount(data)
+
+                if result == "published":
+                    self.status_var.set("すでに出品済みです")
+                    messagebox.showinfo(
+                        "出品済み",
+                        "選択した作品はすでに出品済みです。\n"
+                        "（作品管理ページに配信申請ボタンがありません）",
+                    )
+                elif result == "notfound":
+                    self.status_var.set("配信申請ページが見つかりませんでした")
+                    messagebox.showwarning(
+                        "見つかりません",
+                        "作品管理ページで選択作品の配信申請ボタンが見つかりませんでした。\n"
+                        "作品名・表示カテゴリ（男性向け/TL/BL）・ページをご確認ください。\n"
+                        "（debug_catalog.html に作品管理ページを保存しました）",
+                    )
+                else:
+                    self.status_var.set("完了！ブラウザで確認して手動で申請してください")
+                    messagebox.showinfo(
+                        "完了",
+                        "配信申請のキャンペーン・割引入力が完了しました。\n"
+                        "内容を確認して手動で申請してください。",
+                    )
+            except Exception as e:
+                self.status_var.set(f"エラー: {e}")
+                messagebox.showerror("エラー", str(e))
+
+        threading.Thread(target=run, daemon=True).start()
+
     def create_settings_tab(self):
         c = self.COLORS
         # スクロール可能なキャンバス
@@ -1292,24 +1588,34 @@ class FanzaAutoInputApp:
 
         # 利用可能プロファイル
         ttk.Label(profile_frame, text="利用可能:").grid(row=1, column=0, sticky=tk.NW, padx=5)
+        available_frame = ttk.Frame(profile_frame)
+        available_frame.grid(row=1, column=1, padx=5, pady=2)
         self.available_listbox = tk.Listbox(
-            profile_frame, width=40, height=6,
+            available_frame, width=40, height=6,
             bg=c["entry_bg"], fg=c["entry_fg"],
             selectbackground=c["accent"], selectforeground="#ffffff",
             font=("Meiryo UI", 10), relief=tk.FLAT
         )
-        self.available_listbox.grid(row=1, column=1, padx=5, pady=2)
+        available_scroll = ttk.Scrollbar(available_frame, orient=tk.VERTICAL, command=self.available_listbox.yview)
+        self.available_listbox.configure(yscrollcommand=available_scroll.set)
+        self.available_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        available_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         ttk.Button(profile_frame, text="追加 →", command=self.add_profile).grid(row=1, column=2, padx=5)
 
         # 登録済みプロファイル
         ttk.Label(profile_frame, text="登録済み:").grid(row=2, column=0, sticky=tk.NW, padx=5)
+        registered_frame = ttk.Frame(profile_frame)
+        registered_frame.grid(row=2, column=1, padx=5, pady=2)
         self.registered_listbox = tk.Listbox(
-            profile_frame, width=40, height=6,
+            registered_frame, width=40, height=6,
             bg=c["entry_bg"], fg=c["entry_fg"],
             selectbackground=c["accent"], selectforeground="#ffffff",
             font=("Meiryo UI", 10), relief=tk.FLAT
         )
-        self.registered_listbox.grid(row=2, column=1, padx=5, pady=2)
+        registered_scroll = ttk.Scrollbar(registered_frame, orient=tk.VERTICAL, command=self.registered_listbox.yview)
+        self.registered_listbox.configure(yscrollcommand=registered_scroll.set)
+        self.registered_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        registered_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         ttk.Button(profile_frame, text="削除", command=self.remove_profile).grid(row=2, column=2, padx=5)
 
         # フォルダ設定
@@ -1381,6 +1687,7 @@ class FanzaAutoInputApp:
         profiles = self.profile_manager.profiles
         self.profile_combo['values'] = [p.profile_name for p in profiles]
         self.trailer_profile_combo['values'] = [p.profile_name for p in profiles]
+        self.formal_profile_combo['values'] = [p.profile_name for p in profiles]
 
         # 登録済みプロファイルをリストに表示
         self.refresh_registered_list()
@@ -1493,13 +1800,14 @@ class FanzaAutoInputApp:
             self.comment_text.delete("1.0", tk.END)
             self.comment_text.insert("1.0", processed)
 
-        # 画像枚数（50枚以上のフォルダのみカウント、サンプル/サムネイル除外）
-        total = count_total_images_in_character_folders(product_path, min_images=50)
+        # 画像枚数（キャラクターフォルダから取得）
+        total = count_total_images_in_character_folders(product_path)
         self.file_number_var.set(str(total) if total > 0 else "")
 
-        # パロディ詳細
+        # パロディ詳細（スペース以降は除外。例:「タイトル名 No.2」→「タイトル名」）
         self.parody_entries[0].delete(0, tk.END)
-        self.parody_entries[0].insert(0, self.current_product_folder)
+        parody_title = self.current_product_folder.replace("　", " ").split(" ")[0]
+        self.parody_entries[0].insert(0, parody_title)
 
         char_folders = get_character_folders(product_path, min_images=50)
         for i in range(3):
@@ -1507,12 +1815,11 @@ class FanzaAutoInputApp:
             if i < len(char_folders):
                 self.parody_entries[i+1].insert(0, char_folders[i])
 
-        # ふりがな生成
-        if self.profile_manager.openai_api_key:
-            original_title = f"{self.current_series_folder} {self.current_product_folder}"
-            success, result = self.furigana_converter.convert(original_title.replace("〇", ""))
-            if success:
-                self.title_ruby_var.set(result)
+        # ふりがな生成（シリーズ名 + 商品フォルダ名）
+        original_title = f"{self.current_series_folder} {self.current_product_folder}"
+        success, result = self.furigana_converter.convert(original_title.replace("〇", ""))
+        if success:
+            self.title_ruby_var.set(result)
 
         self.status_var.set(f"読み込み完了: {product_path}")
 
@@ -1550,7 +1857,6 @@ class FanzaAutoInputApp:
         self.set_combo_by_key(self.section_combo, SECTIONS, d.get("section", "1"))
         self.set_combo_by_key(self.age_combo, KEYWORD_AGES, d.get("keyword_age", "156023"))
         self.set_combo_by_key(self.drm_combo, DRM_OPTIONS, d.get("drm_hope", "none"))
-        self.set_combo_by_key(self.auto_join_combo, CAMPAIGN_AUTO_JOIN_OPTIONS, d.get("campaign_auto_join_flg_set_days", "0"))
 
         # 割引設定
         self.discount_enabled_var.set(d.get("pre_release_articles_campaign_flg", "1") == "1")
@@ -1607,7 +1913,7 @@ class FanzaAutoInputApp:
         d["section"] = self.get_combo_key(SECTIONS, self.section_combo.current())
         d["keyword_age"] = self.get_combo_key(KEYWORD_AGES, self.age_combo.current())
         d["drm_hope"] = self.get_combo_key(DRM_OPTIONS, self.drm_combo.current())
-        d["campaign_auto_join_flg_set_days"] = self.get_combo_key(CAMPAIGN_AUTO_JOIN_OPTIONS, self.auto_join_combo.current())
+        d["campaign_auto_join_flg_set_days"] = "0"  # 固定: 発売からすぐに自動参加する
 
         # 割引設定
         d["pre_release_articles_campaign_flg"] = "1" if self.discount_enabled_var.get() else "0"
@@ -1685,6 +1991,82 @@ class FanzaAutoInputApp:
                 messagebox.showerror("エラー", str(e))
 
         threading.Thread(target=run, daemon=True).start()
+
+    def _fetch_keywords_from_page(self, profile_id, is_trailer: bool):
+        """開いているブラウザページからジャンルを読み取ってキーワードを取得（共通処理）"""
+        if not profile_id:
+            messagebox.showwarning("警告", "プロファイルを選択してください")
+            return
+
+        def run():
+            try:
+                self.status_var.set("ブラウザに接続中...")
+                from browser.form_filler import extract_keywords_from_page
+
+                # 起動済みブラウザに接続（未起動の場合は起動して接続）
+                browser = AdsPowerBrowser(self.ads_api)
+                if not browser.start(profile_id):
+                    self.status_var.set("ブラウザ接続失敗")
+                    messagebox.showerror(
+                        "エラー",
+                        "ブラウザに接続できませんでした。\n"
+                        "AdsPowerで対象プロファイルのブラウザを起動し、\n"
+                        "配信中の作品ページ（ジャンルが表示されるページ）を開いてから\n"
+                        "再度お試しください。",
+                    )
+                    return
+
+                self.status_var.set("ページからキーワードを取得中...")
+                keyword_ids = extract_keywords_from_page(
+                    browser.get_driver(),
+                    callback=lambda m: self.status_var.set(m),
+                )
+
+                # UI更新はメインスレッドで実行
+                self.root.after(0, lambda: self._apply_fetched_keywords(keyword_ids, is_trailer))
+            except Exception as e:
+                self.status_var.set(f"エラー: {e}")
+                messagebox.showerror("エラー", str(e))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _apply_fetched_keywords(self, keyword_ids, is_trailer: bool):
+        """取得したキーワードIDを選択状態に反映（メインスレッドから呼ぶ）"""
+        if is_trailer:
+            selected = self.trailer_selected_keywords
+        else:
+            selected = self.selected_keywords
+
+        added = 0
+        for kid in keyword_ids:
+            if kid not in selected and len(selected) < 10:
+                selected.append(kid)
+                added += 1
+
+        if is_trailer:
+            self.update_trailer_keyword_display()
+            self.update_trailer_keyword_button_styles()
+        else:
+            self.update_keyword_display()
+            self.update_keyword_button_styles()
+
+        if not keyword_ids:
+            self.status_var.set("ページからキーワードを取得できませんでした")
+            messagebox.showwarning(
+                "取得なし",
+                "ページからキーワードを取得できませんでした。\n"
+                "配信中の作品ページ（ジャンルが表示されるページ）を開いた状態でお試しください。",
+            )
+        else:
+            self.status_var.set(f"キーワードを{added}件追加しました")
+
+    def fetch_keywords_from_page(self):
+        """作品入力タブ: 開いているページからキーワードを取得"""
+        self._fetch_keywords_from_page(getattr(self, "current_profile_id", None), is_trailer=False)
+
+    def fetch_trailer_keywords_from_page(self):
+        """予約作品タブ: 開いているページからキーワードを取得"""
+        self._fetch_keywords_from_page(getattr(self, "trailer_current_profile_id", None), is_trailer=True)
 
     def create_keyword_buttons(self, parent, keywords):
         """キーワードボタンを作成（スクロール対応）"""
@@ -1848,10 +2230,11 @@ class FanzaAutoInputApp:
             p = self.available_profiles[sel[0]]
             self.profile_manager.add_profile(p.get("user_id"), p.get("name"))
             self.refresh_registered_list()
-            # プロファイルコンボも更新（両タブ）
+            # プロファイルコンボも更新（全タブ）
             profile_names = [p.profile_name for p in self.profile_manager.profiles]
             self.profile_combo['values'] = profile_names
             self.trailer_profile_combo['values'] = profile_names
+            self.formal_profile_combo['values'] = profile_names
 
     def remove_profile(self):
         """プロファイルを削除"""
@@ -1860,10 +2243,11 @@ class FanzaAutoInputApp:
             profile = self.profile_manager.profiles[sel[0]]
             self.profile_manager.remove_profile(profile.profile_id)
             self.refresh_registered_list()
-            # プロファイルコンボも更新（両タブ）
+            # プロファイルコンボも更新（全タブ）
             profile_names = [p.profile_name for p in self.profile_manager.profiles]
             self.profile_combo['values'] = profile_names
             self.trailer_profile_combo['values'] = profile_names
+            self.formal_profile_combo['values'] = profile_names
 
     def on_registered_select(self, event):
         """登録済みプロファイル選択時"""

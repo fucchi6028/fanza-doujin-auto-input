@@ -550,3 +550,26 @@ def get_keyword_name(keyword_id: str) -> str:
                 return name
 
     return keyword_id
+
+
+def _build_name_to_id() -> dict:
+    """キーワード名 → ID の逆引きマップを構築"""
+    mapping: dict[str, str] = {}
+    # カテゴリ別を先に登録（人気は同名の別表記を上書きしないよう後で補完）
+    for category, keywords in KEYWORDS_BY_CATEGORY.items():
+        for kid, name, _ in keywords:
+            mapping.setdefault(name.strip(), kid)
+    for kid, name in POPULAR_KEYWORDS:
+        mapping.setdefault(name.strip(), kid)
+    return mapping
+
+
+# キーワード名 → ID の逆引きマップ（モジュール読み込み時に一度だけ構築）
+NAME_TO_ID = _build_name_to_id()
+
+
+def get_keyword_id(keyword_name: str) -> str:
+    """キーワード名からIDを取得（見つからない場合は None）"""
+    if not keyword_name:
+        return None
+    return NAME_TO_ID.get(keyword_name.strip())

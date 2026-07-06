@@ -4,6 +4,7 @@ AdsPowerプロファイルと作品フォルダの紐付けを管理
 """
 import json
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -39,11 +40,18 @@ class ProfileManager:
     """プロファイル設定マネージャー"""
 
     def __init__(self):
-        self.api_url = "http://local.adspower.net:50325"
+        self.api_url = "http://127.0.0.1:50325"
         self.selected_group_id = ""
         self.openai_api_key = ""
         self.profiles: list[ProfileConfig] = []
         self.load()
+
+    def _extract_profile_number(self, profile: ProfileConfig) -> int:
+        """プロファイル名から数字を抽出してソート用のキーを返す"""
+        match = re.search(r'-(\d+)$', profile.profile_name)
+        if match:
+            return int(match.group(1))
+        return 999999  # 数字がない場合は末尾に配置
 
     def load(self):
         """設定ファイルから読み込み"""
@@ -58,6 +66,8 @@ class ProfileManager:
                         ProfileConfig.from_dict(p)
                         for p in data.get("profiles", [])
                     ]
+                    # プロファイル名の数字順にソート
+                    self.profiles.sort(key=self._extract_profile_number)
             except Exception as e:
                 print(f"Config load error: {e}")
 

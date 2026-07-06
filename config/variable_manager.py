@@ -4,6 +4,7 @@
 """
 import json
 import os
+import zipfile
 from pathlib import Path
 from typing import Optional
 
@@ -155,13 +156,21 @@ class VariableManager:
             self.save()
 
 
-def count_images_in_folder(folder_path: Path) -> int:
-    """フォルダ内の画像ファイル数をカウント"""
+def count_images_in_folder(folder_path: Path, recursive: bool = False) -> int:
+    """フォルダ内の画像ファイル数をカウント
+
+    Args:
+        folder_path: 対象フォルダのパス
+        recursive: Trueの場合、サブフォルダ内の画像も再帰的にカウント
+    """
     count = 0
     try:
         for f in folder_path.iterdir():
             if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS:
                 count += 1
+            elif recursive and f.is_dir():
+                # サブフォルダ（構図フォルダ等）内の画像も再帰的にカウント
+                count += count_images_in_folder(f, recursive=True)
     except Exception:
         pass
     return count
@@ -171,6 +180,10 @@ def get_character_folders(product_path: Path, min_images: int = 50) -> list[str]
     """
     商品フォルダ内から画像が指定枚数以上あるサブフォルダを取得
 
+    フォルダ構造:
+        商品フォルダ ⇒ キャラクター ⇒ 構図 ⇒ 画像
+    構図フォルダ内の画像も再帰的にカウントし、キャラクターフォルダを正しく検出
+
     Returns:
         フォルダ名のリスト（画像枚数の多い順）
     """
@@ -178,7 +191,8 @@ def get_character_folders(product_path: Path, min_images: int = 50) -> list[str]
     try:
         for subfolder in product_path.iterdir():
             if subfolder.is_dir():
-                image_count = count_images_in_folder(subfolder)
+                # 構図フォルダ内の画像も再帰的にカウント
+                image_count = count_images_in_folder(subfolder, recursive=True)
                 if image_count >= min_images:
                     folders.append((subfolder.name, image_count))
 
@@ -194,6 +208,10 @@ def count_total_images_in_character_folders(product_path: Path, min_images: int 
     """
     商品フォルダ内の画像が指定枚数以上あるサブフォルダの画像合計数を取得
 
+    フォルダ構造:
+        商品フォルダ ⇒ キャラクター ⇒ 構図 ⇒ 画像
+    構図フォルダ内の画像も再帰的にカウント
+
     Args:
         product_path: 商品フォルダのパス
         min_images: 最小画像枚数（これ以上のフォルダのみカウント）
@@ -205,7 +223,8 @@ def count_total_images_in_character_folders(product_path: Path, min_images: int 
     try:
         for subfolder in product_path.iterdir():
             if subfolder.is_dir():
-                image_count = count_images_in_folder(subfolder)
+                # 構図フォルダ内の画像も再帰的にカウント
+                image_count = count_images_in_folder(subfolder, recursive=True)
                 if image_count >= min_images:
                     total += image_count
     except Exception as e:
@@ -215,7 +234,11 @@ def count_total_images_in_character_folders(product_path: Path, min_images: int 
 
 def count_all_images_in_product(product_path: Path) -> int:
     """
-    商品フォルダ内のすべての画像をカウント（直下＋サブフォルダ）
+    商品フォルダ内のすべての画像をカウント（直下＋サブフォルダ、再帰的）
+
+    フォルダ構造:
+        商品フォルダ ⇒ キャラクター ⇒ 構図 ⇒ 画像
+    構図フォルダ内の画像も含めて再帰的にカウント
 
     Args:
         product_path: 商品フォルダのパス
@@ -223,18 +246,79 @@ def count_all_images_in_product(product_path: Path) -> int:
     Returns:
         画像の合計枚数
     """
-    total = 0
-    try:
-        # 直下の画像をカウント
-        total += count_images_in_folder(product_path)
+    # 再帰的にすべての画像をカウント
+    return count_images_in_folder(product_path, recursive=True)
 
-        # サブフォルダ内の画像をカウント
-        for subfolder in product_path.iterdir():
-            if subfolder.is_dir():
-                total += count_images_in_folder(subfolder)
+
+def count_images_in_zip_folder(product_path: Path) -> int:
+    """
+    商品フォルダ内の「商品フォルダ.zip」フォルダから画像をカウント
+
+    Args:
+        product_path: 商品フォルダのパス
+
+    Returns:
+        画像の合計枚数
+    """
+    zip_folder = product_path / "商品フォルダ.zip"
+    if zip_folder.exists() and zip_folder.is_dir():
+        return count_images_in_folder(zip_folder)
+    return 0
+
+
+def count_images_in_masked_zip(product_path: Path, masked_title: str = "") -> int:
+    """商品フォルダ内の「タイトルの2文字目が伏字（〇/○）になったZIP」から画像枚数を取得する。
+
+    完成品はタイトルの2文字目を伏字にしたZIPで納品されるため、配信申請ページの
+    「枚数」にはこのZIP内の画像点数を使う。ZIPを解凍せず中身の一覧だけを数える。
+
+    Args:
+        product_path: 商品フォルダのパス
+        masked_title: 伏字済みタイトル（例:「シリーズ名 A〇C」）。一致するZIPを優先する。
+
+    Returns:
+        ZIP内の画像枚数（該当ZIPが見つからなければ0）
+    """
+    try:
+        zip_files = [
+            f for f in product_path.iterdir()
+            if f.is_file() and f.suffix.lower() == ".zip"
+        ]
     except Exception as e:
-        print(f"Count all images error: {e}")
-    return total
+        print(f"Count masked zip error: {e}")
+        return 0
+
+    if not zip_files:
+        return 0
+
+    def _count_in_zip(zip_path: Path) -> int:
+        try:
+            with zipfile.ZipFile(zip_path) as zf:
+                return sum(
+                    1 for name in zf.namelist()
+                    if not name.endswith("/")
+                    and Path(name).suffix.lower() in IMAGE_EXTENSIONS
+                )
+        except Exception as e:
+            print(f"Read zip error ({zip_path.name}): {e}")
+            return 0
+
+    # 1. 伏字タイトルと完全一致するZIPを優先
+    if masked_title:
+        for zf in zip_files:
+            if zf.stem == masked_title:
+                return _count_in_zip(zf)
+
+    # 2. 名前に伏字文字（〇 U+3007 / ○ U+25CB）を含むZIPを優先
+    masked_zips = [zf for zf in zip_files if "〇" in zf.name or "○" in zf.name]
+    if masked_zips:
+        return _count_in_zip(masked_zips[0])
+
+    # 3. ZIPが1つだけならそれを枚数元とみなす
+    if len(zip_files) == 1:
+        return _count_in_zip(zip_files[0])
+
+    return 0
 
 
 def mask_second_char(text: str) -> str:

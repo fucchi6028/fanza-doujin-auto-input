@@ -6,6 +6,7 @@ from .variable_manager import (
     read_description_file,
     get_character_folders,
     count_total_images_in_character_folders,
+    count_images_in_zip_folder,
 )
 
 __all__ = [
@@ -17,4 +18,5 @@ __all__ = [
     "read_description_file",
     "get_character_folders",
     "count_total_images_in_character_folders",
+    "count_images_in_zip_folder",
 ]

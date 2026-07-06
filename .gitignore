@@ -17,9 +17,22 @@ build/
 *.swp
 *.swo
 
-# Config with sensitive data
+# Config with sensitive data / personal data
 config/variables_config.json
 config/keyword_storage.json
+config/profiles_config.json
+config/circle_names.json
+config/series_storage.json
+config/templates/
+
+# Debug dumps and helper scripts (may contain personal/product data)
+debug_*.html
+debug_*.txt
+debug_*.py
+debug_formal_log.txt
+
+# Accidental Windows junk
+nul
 
 # Logs
 *.log

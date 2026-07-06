@@ -1,6 +1,6 @@
 {
   "adspower": {
-    "api_url": "http://local.adspower.net:50325",
+    "api_url": "http://127.0.0.1:50325",
     "default_profile_id": ""
   },
   "default_values": {

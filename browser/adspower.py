@@ -12,7 +12,7 @@ from selenium.webdriver.chrome.options import Options
 class AdsPowerAPI:
     """AdsPower API クライアント"""
 
-    def __init__(self, api_url: str = "http://local.adspower.net:50325"):
+    def __init__(self, api_url: str = "http://127.0.0.1:50325"):
         self.api_url = api_url.rstrip("/")
 
     def check_connection(self) -> tuple[bool, str]:
@@ -27,42 +27,77 @@ class AdsPowerAPI:
         except Exception as e:
             return False, str(e)
 
+    PAGE_SIZE = 100      # AdsPower API の最大 page_size
+    RATE_LIMIT_SEC = 1.1 # AdsPower Local API: 1 req/sec 制限 + マージン
+
+    def _request_page(self, endpoint: str, params: dict, max_retries: int = 4) -> dict:
+        """1ページ分のAPI呼び出し（レート制限リトライ付き）。失敗時は最後の data を返す。"""
+        last_data: dict = {}
+        backoff = self.RATE_LIMIT_SEC
+        for attempt in range(max_retries):
+            response = requests.get(f"{self.api_url}{endpoint}", params=params, timeout=10)
+            last_data = response.json() or {}
+            if last_data.get("code") == 0:
+                return last_data
+            msg = (last_data.get("msg") or "").lower()
+            # レート制限らしきメッセージならバックオフして再試行
+            if any(k in msg for k in ("too many", "frequent", "请求", "rate")):
+                time.sleep(backoff)
+                backoff = min(backoff * 1.5, 5.0)
+                continue
+            # それ以外のエラーはそのまま返す
+            return last_data
+        return last_data
+
+    def _fetch_all_pages(self, endpoint: str, extra_params: dict = None) -> list[dict]:
+        """AdsPower のリスト系エンドポイントを全ページ取得"""
+        results: list[dict] = []
+        page = 1
+        while True:
+            params = {"page": page, "page_size": self.PAGE_SIZE}
+            if extra_params:
+                params.update(extra_params)
+
+            # 2ページ目以降はレート制限回避のため必ず待機
+            if page > 1:
+                time.sleep(self.RATE_LIMIT_SEC)
+
+            data = self._request_page(endpoint, params)
+            if data.get("code") != 0:
+                print(f"{endpoint} error (page {page}): {data.get('msg')}")
+                break
+
+            payload = data.get("data", {}) or {}
+            items = payload.get("list", []) or []
+            results.extend(items)
+
+            # 終了判定: 返却件数が page_size 未満、または total に到達
+            if len(items) < self.PAGE_SIZE:
+                break
+            total = payload.get("total")
+            if isinstance(total, int) and len(results) >= total:
+                break
+
+            page += 1
+            if page > 100:  # 安全弁
+                print(f"{endpoint}: pagination safety break at page {page}")
+                break
+
+        return results
+
     def get_groups(self) -> list[dict]:
-        """グループ一覧を取得"""
+        """グループ一覧を全件取得"""
         try:
-            response = requests.get(
-                f"{self.api_url}/api/v1/group/list",
-                params={"page_size": 100},
-                timeout=10
-            )
-            data = response.json()
-            if data.get("code") == 0:
-                groups = data.get("data", {}).get("list", [])
-                return groups
-            print(f"Group list error: {data.get('msg')}")
-            return []
+            return self._fetch_all_pages("/api/v1/group/list")
         except Exception as e:
             print(f"Get groups error: {e}")
             return []
 
     def get_profiles(self, group_id: str = None) -> list[dict]:
-        """プロファイル一覧を取得（グループ指定可）"""
+        """プロファイル一覧を全件取得（グループ指定可）"""
         try:
-            params = {"page_size": 100}
-            if group_id:
-                params["group_id"] = group_id
-
-            response = requests.get(
-                f"{self.api_url}/api/v1/user/list",
-                params=params,
-                timeout=10
-            )
-            data = response.json()
-            if data.get("code") == 0:
-                profiles = data.get("data", {}).get("list", [])
-                return profiles
-            print(f"Profile list error: {data.get('msg')}")
-            return []
+            extra = {"group_id": group_id} if group_id else None
+            return self._fetch_all_pages("/api/v1/user/list", extra)
         except Exception as e:
             print(f"Get profiles error: {e}")
             return []
