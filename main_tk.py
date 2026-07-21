@@ -2,9 +2,10 @@
 FANZA同人 自動入力ツール (tkinter版)
 """
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, simpledialog
 import json
 import os
+import re
 import sys
 import threading
 from pathlib import Path
@@ -33,6 +34,12 @@ from config.keywords_data import (
 )
 from config.keyword_storage import KeywordStorage
 from utils.furigana import FuriganaConverter
+from management.manager import ListingManager, current_ym, next_ym, prev_ym, TABLE_LABELS
+from management.db import (
+    TABLE_LISTING, TABLE_RESERVED, SLOTS_PER_MONTH, STATUS_LIST,
+    normalize_account, account_sort_key,
+)
+from management import excel_export
 
 # 定数定義
 ARTICLE_TYPES = [
@@ -79,6 +86,47 @@ def mask_second_char(text: str) -> str:
     if len(text) >= 2:
         return text[0] + "〇" + text[2:]
     return text
+
+
+def extract_number(text: str):
+    """文字列から数字を抽出して整数で返す（例: 'FANZA-001'→1, 'K-01'→1）。なければNone"""
+    matches = re.findall(r'\d+', text)
+    if matches:
+        return int(matches[-1])
+    return None
+
+
+# 巻数を表す末尾文字（半角/全角数字・丸数字など）。スペースが無くても除去する。
+_VOLUME_TAIL_RE = re.compile(
+    r"[0-9０-９"
+    r"①-⑳"   # ①〜⑳
+    r"㉑-㉟"   # ㉑〜㉟
+    r"㊱-㊿"   # ㊱〜㊿
+    r"]+$"
+)
+
+
+def derive_parody_title(folder_name: str) -> str:
+    """商品フォルダ名からパロディ詳細1に入れるタイトルを導出する。
+
+    スペース（全角/半角）以降を除去し、さらに末尾の巻数表記（半角/全角数字・
+    丸数字①など）はスペースが無くても除去する。
+    例:「タイトル名 No.2」→「タイトル名」、「タイトル②」→「タイトル」、
+    「タイトル３」→「タイトル」。
+    """
+    title = (folder_name or "").replace("　", " ").split(" ")[0]
+    return _VOLUME_TAIL_RE.sub("", title)
+
+
+def find_matching_base_folder_index(profile_name: str, folder_names: list[str]):
+    """プロファイル名の数字と一致するベースフォルダのインデックスを返す（なければNone）"""
+    target = extract_number(profile_name)
+    if target is None:
+        return None
+    for i, name in enumerate(folder_names):
+        if extract_number(name) == target:
+            return i
+    return None
 
 
 def get_subfolders(folder_path: str) -> list[str]:
@@ -173,6 +221,8 @@ class FanzaAutoInputApp:
         self.keyword_storage = KeywordStorage()
         self.ads_api = AdsPowerAPI(self.profile_manager.api_url)
         self.furigana_converter = FuriganaConverter(self.profile_manager.openai_api_key)
+        # 出品管理表（SQLiteが正・Excelは出力用）
+        self.listing_manager = ListingManager()
 
         # 現在選択中の状態
         self.current_profile_id = None
@@ -406,6 +456,11 @@ class FanzaAutoInputApp:
         self.notebook.add(self.formal_frame, text="配信申請")
         self.create_formal_registration_tab()
 
+        # 出品管理表タブ
+        self.mgmt_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.mgmt_frame, text="出品管理表")
+        self.create_management_tab()
+
         # 設定タブ
         self.settings_frame = ttk.Frame(self.notebook)
         self.notebook.add(self.settings_frame, text="設定")
@@ -486,6 +541,7 @@ class FanzaAutoInputApp:
         # ボタン
         btn_frame = ttk.Frame(select_frame)
         btn_frame.grid(row=2, column=0, columnspan=4, pady=10)
+        ttk.Button(btn_frame, text="フォルダ参照", command=self.browse_input_base_parent).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="保存", command=self.save_product, style="Success.TButton").pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="自動入力開始", command=self.start_auto_input, style="Accent.TButton").pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="再読み込み", command=self.reload_product).pack(side=tk.LEFT, padx=5)
@@ -1037,12 +1093,19 @@ class FanzaAutoInputApp:
         if idx >= 0:
             profile = self.profile_manager.profiles[idx]
             self.trailer_current_profile_id = profile.profile_id
-            self.trailer_base_folder_combo['values'] = [Path(f).name for f in profile.folders]
+            folder_names = [Path(f).name for f in profile.folders]
+            self.trailer_base_folder_combo['values'] = folder_names
             self.trailer_base_folder_combo.set('')
             self.trailer_series_combo['values'] = []
             self.trailer_series_combo.set('')
             self.trailer_product_combo['values'] = []
             self.trailer_product_combo.set('')
+
+            # プロファイル名の数字と一致するベースフォルダを自動選択
+            match_idx = find_matching_base_folder_index(profile.profile_name, folder_names)
+            if match_idx is not None:
+                self.trailer_base_folder_combo.current(match_idx)
+                self.on_trailer_base_folder_change(None)
 
     def on_trailer_base_folder_change(self, event):
         """予約作品タブでベースフォルダ選択時"""
@@ -1118,9 +1181,9 @@ class FanzaAutoInputApp:
         total = count_total_images_in_character_folders(product_path)
         self.trailer_file_number_var.set(str(total) if total > 0 else "")
 
-        # パロディ詳細（スペース以降は除外。例:「タイトル名 No.2」→「タイトル名」）
+        # パロディ詳細（スペース以降＋末尾の巻数数字/丸数字を除外）
         self.trailer_parody_entries[0].delete(0, tk.END)
-        parody_title = self.trailer_current_product_folder.replace("　", " ").split(" ")[0]
+        parody_title = derive_parody_title(self.trailer_current_product_folder)
         self.trailer_parody_entries[0].insert(0, parody_title)
 
         char_folders = get_character_folders(product_path, min_images=50)
@@ -1225,6 +1288,15 @@ class FanzaAutoInputApp:
 
         data = self.get_trailer_data()
 
+        # 予約出品管理表: アカウント・タイトルを特定し、重複を事前チェック
+        acct = self._account_code_for(getattr(self, "trailer_current_profile_id", None))
+        title = self._join_title(
+            getattr(self, "trailer_current_series_folder", None),
+            getattr(self, "trailer_current_product_folder", None),
+        )
+        if not self._confirm_no_duplicate(acct, title, TABLE_RESERVED):
+            return
+
         def run():
             try:
                 self.status_var.set("ブラウザを起動中...")
@@ -1242,6 +1314,8 @@ class FanzaAutoInputApp:
                 filler.fill_form(data)
 
                 self.status_var.set("完了！ブラウザで確認してください")
+                # 予約出品管理表へ自動チェック
+                self._record_slot("reserved", acct, title)
                 messagebox.showinfo("完了", "予約作品の自動入力が完了しました。\nブラウザで内容を確認してください。")
             except Exception as e:
                 self.status_var.set(f"エラー: {e}")
@@ -1391,13 +1465,20 @@ class FanzaAutoInputApp:
         if idx >= 0:
             profile = self.profile_manager.profiles[idx]
             self.formal_current_profile_id = profile.profile_id
-            self.formal_base_folder_combo['values'] = [Path(f).name for f in profile.folders]
+            folder_names = [Path(f).name for f in profile.folders]
+            self.formal_base_folder_combo['values'] = folder_names
             self.formal_base_folder_combo.set('')
             self.formal_series_combo['values'] = []
             self.formal_series_combo.set('')
             self.formal_product_combo['values'] = []
             self.formal_product_combo.set('')
             self.formal_file_number_var.set('')
+
+            # プロファイル名の数字と一致するベースフォルダを自動選択
+            match_idx = find_matching_base_folder_index(profile.profile_name, folder_names)
+            if match_idx is not None:
+                self.formal_base_folder_combo.current(match_idx)
+                self.on_formal_base_folder_change(None)
 
     def on_formal_base_folder_change(self, event):
         """配信申請タブでベースフォルダ選択時"""
@@ -1470,6 +1551,15 @@ class FanzaAutoInputApp:
         # 枚数を伏字ZIPから自動再取得して最新化
         self.fetch_formal_file_number()
 
+        # 出品管理表（予告出品）: 他アカウントとの重複を事前チェック
+        _formal_acct = self._account_code_for(
+            getattr(self, "formal_current_profile_id", None))
+        _formal_title = self._join_title(
+            getattr(self, "formal_current_series_folder", None),
+            getattr(self, "formal_current_product_folder", None))
+        if not self._confirm_no_duplicate(_formal_acct, _formal_title, TABLE_LISTING):
+            return
+
         # 作品を選択していれば、伏字タイトルで配信申請ページを自動オープンできる
         masked_title = ""
         masked_product = ""
@@ -1528,6 +1618,13 @@ class FanzaAutoInputApp:
                     )
                 else:
                     self.status_var.set("完了！ブラウザで確認して手動で申請してください")
+                    # 予告出品 → 出品管理表（当月0枠なら当月/出品済みなら翌月）
+                    acct = self._account_code_for(
+                        getattr(self, "formal_current_profile_id", None))
+                    title = self._join_title(
+                        getattr(self, "formal_current_series_folder", None),
+                        getattr(self, "formal_current_product_folder", None))
+                    self._record_slot("trailer", acct, title)
                     messagebox.showinfo(
                         "完了",
                         "配信申請のキャンペーン・割引入力が完了しました。\n"
@@ -1573,6 +1670,13 @@ class FanzaAutoInputApp:
         self.openai_key_var = tk.StringVar(value=self.profile_manager.openai_api_key)
         ttk.Entry(conn_frame, textvariable=self.openai_key_var, width=40, show="*").grid(row=1, column=1, padx=5, pady=2)
         ttk.Button(conn_frame, text="保存", command=self.save_settings).grid(row=1, column=2, padx=5)
+
+        # Discord webhook（出品管理表の通知先）
+        ttk.Label(conn_frame, text="Discord webhook URL:").grid(row=2, column=0, sticky=tk.W, padx=5)
+        self.discord_webhook_var = tk.StringVar(value=self.listing_manager.get_webhook())
+        ttk.Entry(conn_frame, textvariable=self.discord_webhook_var, width=40).grid(row=2, column=1, padx=5, pady=2)
+        ttk.Button(conn_frame, text="保存", command=self.save_webhook).grid(row=2, column=2, padx=5)
+        ttk.Button(conn_frame, text="テスト送信", command=self.test_webhook).grid(row=2, column=3, padx=5)
 
         # === プロファイル設定 ===
         profile_frame = ttk.LabelFrame(scrollable_frame, text="プロファイル設定", padding=10)
@@ -1631,6 +1735,7 @@ class FanzaAutoInputApp:
         folder_btn_frame = ttk.Frame(profile_frame)
         folder_btn_frame.grid(row=3, column=2, padx=5)
         ttk.Button(folder_btn_frame, text="フォルダ追加", command=self.add_folder).pack(pady=2)
+        ttk.Button(folder_btn_frame, text="親フォルダから一括追加", command=self.add_folders_from_parent).pack(pady=2)
         ttk.Button(folder_btn_frame, text="フォルダ削除", command=self.remove_folder).pack(pady=2)
 
         self.registered_listbox.bind("<<ListboxSelect>>", self.on_registered_select)
@@ -1692,6 +1797,15 @@ class FanzaAutoInputApp:
         # 登録済みプロファイルをリストに表示
         self.refresh_registered_list()
 
+        # 出品管理表: アカウント同期・当月/翌月レコード準備・月初通知
+        try:
+            self.listing_manager.startup(
+                profile_names=[p.profile_name for p in profiles]
+            )
+            self.refresh_management_view()
+        except Exception as e:
+            print(f"[management] startup skipped: {e}")
+
         # 接続テスト
         connected, _ = self.ads_api.check_connection()
         if connected:
@@ -1704,26 +1818,71 @@ class FanzaAutoInputApp:
         for p in self.profile_manager.profiles:
             self.registered_listbox.insert(tk.END, f"{p.profile_name} ({len(p.folders)}フォルダ)")
 
+    def browse_input_base_parent(self):
+        """プロファイル登録なしで、ベースフォルダ（例: FANZA-AI-001）を直接参照する。
+        プロファイル・ベースフォルダ欄は空のまま、直下をシリーズに流し込む。
+        自動入力は使えないがコピペ用に各項目を表示する。"""
+        initial = getattr(self, '_input_browse_parent', None)
+        base_folder = filedialog.askdirectory(
+            title="ベースフォルダを選択（例: FANZA-AI-001 / 直下がシリーズ）",
+            initialdir=initial or "",
+        )
+        if not base_folder:
+            return
+
+        subfolders = get_subfolders(base_folder)
+        if not subfolders:
+            messagebox.showwarning(
+                "警告",
+                "選択したフォルダの直下にシリーズフォルダが見つかりませんでした。\n"
+                "シリーズフォルダを含むベースフォルダ（例: FANZA-AI-001）を選んでください。",
+            )
+            return
+
+        self._input_browse_parent = str(Path(base_folder).parent)
+        self.current_base_folder = base_folder
+
+        # プロファイル・ベースフォルダは未選択のまま、シリーズから選ばせる
+        self.current_profile_id = None
+        self.profile_combo.set('')
+        self.base_folder_combo['values'] = []
+        self.base_folder_combo.set('')
+        self.series_combo['values'] = subfolders
+        self.series_combo.set('')
+        self.product_combo['values'] = []
+        self.product_combo.set('')
+        self.selected_keywords = []
+        self.update_keyword_display()
+        self.update_keyword_button_styles()
+        self.status_var.set(f"フォルダ参照: {base_folder}（シリーズから選択・コピペ用）")
+
     def on_profile_change(self, event):
         """プロファイル選択時"""
         idx = self.profile_combo.current()
         if idx >= 0:
             profile = self.profile_manager.profiles[idx]
             self.current_profile_id = profile.profile_id
-            self.base_folder_combo['values'] = [Path(f).name for f in profile.folders]
+            self.input_base_folders = list(profile.folders)
+            folder_names = [Path(f).name for f in profile.folders]
+            self.base_folder_combo['values'] = folder_names
             self.base_folder_combo.set('')
             self.series_combo['values'] = []
             self.series_combo.set('')
             self.product_combo['values'] = []
             self.product_combo.set('')
 
+            # プロファイル名の数字と一致するベースフォルダを自動選択
+            match_idx = find_matching_base_folder_index(profile.profile_name, folder_names)
+            if match_idx is not None:
+                self.base_folder_combo.current(match_idx)
+                self.on_base_folder_change(None)
+
     def on_base_folder_change(self, event):
-        """ベースフォルダ選択時"""
-        idx = self.profile_combo.current()
+        """ベースフォルダ選択時（プロファイル選択・フォルダ参照の両対応）"""
         base_idx = self.base_folder_combo.current()
-        if idx >= 0 and base_idx >= 0:
-            profile = self.profile_manager.profiles[idx]
-            self.current_base_folder = profile.folders[base_idx]
+        folders = getattr(self, 'input_base_folders', [])
+        if 0 <= base_idx < len(folders):
+            self.current_base_folder = folders[base_idx]
             subfolders = get_subfolders(self.current_base_folder)
             self.series_combo['values'] = subfolders
             self.series_combo.set('')
@@ -1804,9 +1963,9 @@ class FanzaAutoInputApp:
         total = count_total_images_in_character_folders(product_path)
         self.file_number_var.set(str(total) if total > 0 else "")
 
-        # パロディ詳細（スペース以降は除外。例:「タイトル名 No.2」→「タイトル名」）
+        # パロディ詳細（スペース以降＋末尾の巻数数字/丸数字を除外）
         self.parody_entries[0].delete(0, tk.END)
-        parody_title = self.current_product_folder.replace("　", " ").split(" ")[0]
+        parody_title = derive_parody_title(self.current_product_folder)
         self.parody_entries[0].insert(0, parody_title)
 
         char_folders = get_character_folders(product_path, min_images=50)
@@ -1968,6 +2127,12 @@ class FanzaAutoInputApp:
 
         self.save_ui_to_data()
 
+        # 出品管理表: アカウント・作品タイトルを特定し、重複を事前チェック
+        acct = self._account_code_for(self.current_profile_id)
+        title = self._current_work_title()
+        if not self._confirm_no_duplicate(acct, title, TABLE_LISTING):
+            return
+
         def run():
             try:
                 self.status_var.set("ブラウザを起動中...")
@@ -1985,6 +2150,8 @@ class FanzaAutoInputApp:
                 filler.fill_form(self.product.data)
 
                 self.status_var.set("完了！ブラウザで確認してください")
+                # 出品管理表へ自動チェック
+                self._record_slot("listing", acct, title)
                 messagebox.showinfo("完了", "自動入力が完了しました。\nブラウザで内容を確認してください。")
             except Exception as e:
                 self.status_var.set(f"エラー: {e}")
@@ -2206,6 +2373,370 @@ class FanzaAutoInputApp:
         self.furigana_converter.set_api_key(self.openai_key_var.get())
         messagebox.showinfo("保存", "設定を保存しました")
 
+    def save_webhook(self):
+        """Discord webhook URL を保存"""
+        self.listing_manager.set_webhook(self.discord_webhook_var.get().strip())
+        messagebox.showinfo("保存", "Discord webhook URL を保存しました")
+
+    def test_webhook(self):
+        """Discord へテスト送信"""
+        self.listing_manager.set_webhook(self.discord_webhook_var.get().strip())
+        ok, detail = self.listing_manager.notify_detailed(
+            "🔔 テスト送信: FANZA出品管理表からの通知テストです。")
+        if ok:
+            messagebox.showinfo("送信", "Discordへテスト送信しました。\nチャンネルを確認してください。")
+        else:
+            messagebox.showwarning("送信失敗", f"送信できませんでした。\n\n{detail}")
+
+    def _account_code_for(self, profile_id):
+        """profile_id から管理表アカウントコード（001 等）を得る。"""
+        p = self.profile_manager.get_profile(profile_id) if profile_id else None
+        return normalize_account(p.profile_name) if p else None
+
+    # ===== 出品管理表 連携ヘルパー =====
+    def _join_title(self, series, product):
+        if series and product:
+            return f"{series} {product}"
+        return None
+
+    def _current_work_title(self):
+        return self._join_title(
+            getattr(self, "current_series_folder", None),
+            getattr(self, "current_product_folder", None),
+        )
+
+    def _confirm_no_duplicate(self, acct, title, table_type):
+        """他アカウントに同一作品があれば確認ダイアログを出す。続行ならTrue。"""
+        if not acct or not title:
+            return True  # 管理表に紐付けできない場合はそのまま続行
+        try:
+            dups = self.listing_manager.find_duplicates(title, exclude_account=acct)
+        except Exception as e:
+            print(f"[management] duplicate check failed: {e}")
+            return True
+        if not dups:
+            return True
+        where = "、".join(
+            f"{h['account']}({TABLE_LABELS[h['table_type']]}/{h['ym']})" for h in dups
+        )
+        # 重複疑いはDiscordにも通知（見落とし防止）
+        try:
+            self.listing_manager.notify(
+                f"⚠️ 重複登録の疑い\n作品「{title}」は既に登録済み: {where}\n"
+                f"（{acct} で登録しようとしています）"
+            )
+        except Exception:
+            pass
+        return messagebox.askyesno(
+            "重複の疑い",
+            f"作品「{title}」は既に別アカウントに登録されています:\n{where}\n\n"
+            "重複出品の可能性があります。このまま処理を続けますか？",
+        )
+
+    def _record_slot(self, kind, acct, title):
+        """3操作の成功時に管理表へ自動チェック（ワーカースレッドから呼ぶ）。"""
+        if not acct or not title:
+            return
+        try:
+            if kind == "listing":
+                res = self.listing_manager.record_listing(acct, title)
+            elif kind == "reserved":
+                res = self.listing_manager.record_reserved(acct, title)
+            else:  # trailer(予告出品)
+                res = self.listing_manager.record_trailer(acct, title)
+        except Exception as e:
+            print(f"[management] record failed: {e}")
+            return
+        # UI更新はメインスレッドで
+        try:
+            self.root.after(0, self._on_slot_recorded, res)
+        except Exception:
+            pass
+
+    def _on_slot_recorded(self, res):
+        self.refresh_management_view()
+        if not res.get("ok"):
+            if res.get("reason") == "full":
+                messagebox.showwarning(
+                    "枠が満杯",
+                    f"{res['account']} の {res['ym']} "
+                    f"{TABLE_LABELS[res['table_type']]}は既に3枠埋まっています。\n"
+                    "手動で確認してください。",
+                )
+            return
+        label = TABLE_LABELS[res["table_type"]]
+        extra = "（当月出品済みのため翌月へ繰り上げ）" if res.get("carried_next") else ""
+        self.status_var.set(
+            f"管理表更新: {res['account']} {res['ym']} {label} 枠{res['slot_no']} "
+            f"({res['filled']}/{SLOTS_PER_MONTH}){extra}"
+        )
+
+    # ===== 出品管理表タブ =====
+    MGMT_TABLES = {"出品管理表": TABLE_LISTING, "予約出品管理表": TABLE_RESERVED}
+    MGMT_FILTERS = ["全アカウント", "0枠（未着手）のみ", "あと1枠だけ空き",
+                    "3枠未満（未完了）のみ", "完了（3/3）のみ"]
+
+    def create_management_tab(self):
+        c = self.COLORS
+        frame = self.mgmt_frame
+
+        # --- 操作バー ---
+        bar = ttk.Frame(frame)
+        bar.pack(fill=tk.X, padx=5, pady=5)
+
+        ttk.Label(bar, text="月:").pack(side=tk.LEFT, padx=(2, 2))
+        cur = current_ym()
+        months = [prev_ym(cur), cur, next_ym(cur), next_ym(next_ym(cur))]
+        self.mgmt_month_var = tk.StringVar(value=cur)
+        self.mgmt_month_combo = ttk.Combobox(
+            bar, textvariable=self.mgmt_month_var, values=months,
+            width=10, state="readonly")
+        self.mgmt_month_combo.pack(side=tk.LEFT, padx=2)
+        self.mgmt_month_combo.bind("<<ComboboxSelected>>",
+                                   lambda e: self.refresh_management_view())
+
+        ttk.Label(bar, text="表:").pack(side=tk.LEFT, padx=(10, 2))
+        self.mgmt_table_var = tk.StringVar(value="出品管理表")
+        self.mgmt_table_combo = ttk.Combobox(
+            bar, textvariable=self.mgmt_table_var,
+            values=list(self.MGMT_TABLES.keys()), width=14, state="readonly")
+        self.mgmt_table_combo.pack(side=tk.LEFT, padx=2)
+        self.mgmt_table_combo.bind("<<ComboboxSelected>>",
+                                   lambda e: self.refresh_management_view())
+
+        ttk.Label(bar, text="表示:").pack(side=tk.LEFT, padx=(10, 2))
+        self.mgmt_filter_var = tk.StringVar(value=self.MGMT_FILTERS[0])
+        self.mgmt_filter_combo = ttk.Combobox(
+            bar, textvariable=self.mgmt_filter_var,
+            values=self.MGMT_FILTERS, width=16, state="readonly")
+        self.mgmt_filter_combo.pack(side=tk.LEFT, padx=2)
+        self.mgmt_filter_combo.bind("<<ComboboxSelected>>",
+                                    lambda e: self.refresh_management_view())
+
+        ttk.Button(bar, text="更新", command=self.refresh_management_view).pack(side=tk.LEFT, padx=(10, 2))
+        ttk.Button(bar, text="Excelから取込", command=self.import_management_excel).pack(side=tk.LEFT, padx=2)
+        ttk.Button(bar, text="Excel出力", command=self.export_management_excel).pack(side=tk.LEFT, padx=2)
+        ttk.Button(bar, text="日次レポート送信", command=self.send_daily_report_now).pack(side=tk.LEFT, padx=2)
+
+        # --- サマリ ---
+        self.mgmt_summary_var = tk.StringVar(value="")
+        ttk.Label(frame, textvariable=self.mgmt_summary_var,
+                  foreground=c["fg_secondary"]).pack(fill=tk.X, padx=8, pady=(0, 4))
+
+        # --- 表（Treeview） ---
+        tree_frame = ttk.Frame(frame)
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=2)
+
+        cols = ("account", "circle", "slot1", "slot2", "slot3", "count", "state")
+        self.mgmt_tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
+                                      selectmode="browse", height=18)
+        headers = [("account", "アカウント", 90), ("circle", "サークル名", 130),
+                   ("slot1", "枠1", 200), ("slot2", "枠2", 200), ("slot3", "枠3", 200),
+                   ("count", "消化", 50), ("state", "状態", 70)]
+        for key, label, w in headers:
+            self.mgmt_tree.heading(key, text=label)
+            self.mgmt_tree.column(key, width=w,
+                                  anchor=(tk.CENTER if key in ("account", "count", "state") else tk.W))
+        self._mgmt_col_count = len(cols)
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.mgmt_tree.yview)
+        self.mgmt_tree.configure(yscrollcommand=vsb.set)
+        self.mgmt_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # 行の色分けタグ（緑=完了/黄=進行中/赤=未着手）
+        self.mgmt_tree.tag_configure("green", background="#14532d", foreground="#c6efce")
+        self.mgmt_tree.tag_configure("yellow", background="#5c4a00", foreground="#ffe9a6")
+        self.mgmt_tree.tag_configure("red", background="#5c1a25", foreground="#ffc7ce")
+
+        # --- 手動修正バー ---
+        edit = ttk.LabelFrame(frame, text="手動修正（自動判定のズレを補正）", padding=8)
+        edit.pack(fill=tk.X, padx=5, pady=5)
+
+        ttk.Label(edit, text="対象: 上で行を選択 →").pack(side=tk.LEFT, padx=2)
+        ttk.Label(edit, text="枠:").pack(side=tk.LEFT, padx=(6, 2))
+        self.mgmt_slot_var = tk.StringVar(value="1")
+        ttk.Combobox(edit, textvariable=self.mgmt_slot_var,
+                     values=[str(i) for i in range(1, SLOTS_PER_MONTH + 1)],
+                     width=4, state="readonly").pack(side=tk.LEFT, padx=2)
+        ttk.Button(edit, text="ON", command=lambda: self.manual_toggle(True)).pack(side=tk.LEFT, padx=2)
+        ttk.Button(edit, text="OFF", command=lambda: self.manual_toggle(False)).pack(side=tk.LEFT, padx=2)
+
+        ttk.Label(edit, text="ステータス:").pack(side=tk.LEFT, padx=(14, 2))
+        self.mgmt_status_var = tk.StringVar(value="")
+        ttk.Combobox(edit, textvariable=self.mgmt_status_var,
+                     values=STATUS_LIST, width=10, state="readonly").pack(side=tk.LEFT, padx=2)
+        ttk.Button(edit, text="ステータス適用",
+                   command=self.apply_status).pack(side=tk.LEFT, padx=2)
+
+    def _mgmt_ctx(self):
+        """現在の (ym, table_type) を返す。"""
+        ym = self.mgmt_month_var.get()
+        table_type = self.MGMT_TABLES.get(self.mgmt_table_var.get(), TABLE_LISTING)
+        return ym, table_type
+
+    def refresh_management_view(self):
+        """Treeview を現在の月・表・フィルタで再描画する。"""
+        if not hasattr(self, "mgmt_tree"):
+            return
+        ym, table_type = self._mgmt_ctx()
+        try:
+            self.listing_manager.ensure_months([ym])
+        except Exception as e:
+            print(f"[management] ensure_months failed: {e}")
+
+        for iid in self.mgmt_tree.get_children():
+            self.mgmt_tree.delete(iid)
+
+        from management import db as _db
+        filt = self.mgmt_filter_var.get()
+        counts = self.listing_manager.fill_counts(ym, table_type)
+        names = self.listing_manager.account_names()
+        shown = 0
+        for account in self.listing_manager.accounts():
+            slots = _db.get_slots(ym, account, table_type, self.listing_manager.db_path)
+            count = counts.get(account, 0)
+            if filt == "0枠（未着手）のみ" and count != 0:
+                continue
+            if filt == "あと1枠だけ空き" and count != SLOTS_PER_MONTH - 1:
+                continue
+            if filt == "3枠未満（未完了）のみ" and count >= SLOTS_PER_MONTH:
+                continue
+            if filt == "完了（3/3）のみ" and count < SLOTS_PER_MONTH:
+                continue
+            cells = []
+            for s in range(1, SLOTS_PER_MONTH + 1):
+                row = next((r for r in slots if r["slot_no"] == s), None)
+                cells.append(self._slot_cell_text(row))
+            color = self.listing_manager.status_color(count)
+            label = {"green": "完了", "yellow": "進行中", "red": "未着手"}[color]
+            self.mgmt_tree.insert(
+                "", tk.END, iid=account,
+                values=(account, names.get(account, ""),
+                        cells[0], cells[1], cells[2], f"{count}/3", label),
+                tags=(color,))
+            shown += 1
+
+        zero = len(self.listing_manager.accounts_zero(ym, table_type))
+        one = len(self.listing_manager.accounts_one_left(ym, table_type))
+        incomplete = len(self.listing_manager.accounts_incomplete(ym, table_type))
+        done = sum(1 for cnt in counts.values() if cnt >= SLOTS_PER_MONTH)
+        self.mgmt_summary_var.set(
+            f"{ym} {self.mgmt_table_var.get()} ｜ 表示 {shown}件 ｜ "
+            f"完了 {done} / 3枠未満 {incomplete}（あと1枠 {one} / 未着手 {zero}）")
+
+    @staticmethod
+    def _slot_cell_text(row):
+        if not row:
+            return ""
+        from management.db import is_occupied
+        if not is_occupied(row):
+            if row.get("status") == "却下" and row.get("product_title"):
+                return f"（却下:{row['product_title']}）"
+            return ""
+        parts = ["✓"]
+        if row.get("product_title"):
+            parts.append(row["product_title"])
+        if row.get("status"):
+            parts.append(f"[{row['status']}]")
+        return " ".join(parts)
+
+    def _selected_account(self):
+        sel = self.mgmt_tree.selection() if hasattr(self, "mgmt_tree") else None
+        if not sel:
+            messagebox.showwarning("未選択", "対象アカウントの行を選択してください。")
+            return None
+        return sel[0]
+
+    def manual_toggle(self, checked):
+        account = self._selected_account()
+        if not account:
+            return
+        ym, table_type = self._mgmt_ctx()
+        slot_no = int(self.mgmt_slot_var.get())
+        title = None
+        if checked:
+            title = simpledialog.askstring(
+                "作品名（任意）",
+                f"{account} {ym} {TABLE_LABELS[table_type]} 枠{slot_no} に入れる作品名\n"
+                "（空欄可・後から編集不要ならそのままOK）",
+                parent=self.root) or None
+        self.listing_manager.set_manual(account, table_type, ym, slot_no, checked, title)
+        self.refresh_management_view()
+
+    def apply_status(self):
+        account = self._selected_account()
+        if not account:
+            return
+        ym, table_type = self._mgmt_ctx()
+        slot_no = int(self.mgmt_slot_var.get())
+        status = self.mgmt_status_var.get()
+        self.listing_manager.set_status(account, table_type, ym, slot_no, status)
+        if status == "却下":
+            messagebox.showinfo(
+                "枠を解放",
+                f"{account} 枠{slot_no} を却下として枠を空きに戻しました。")
+        self.refresh_management_view()
+
+    def import_management_excel(self):
+        """既存の出品管理表Excelを取り込む（サークル名・出品済み○を反映）。"""
+        path = filedialog.askopenfilename(
+            title="取り込む出品管理表Excelを選択",
+            filetypes=[("Excel", "*.xlsx *.xlsm")])
+        if not path:
+            return
+        if not messagebox.askyesno(
+            "取込確認",
+            "選択したExcelの内容で管理表を更新します。\n"
+            "・サークル名 → アカウント名として反映\n"
+            "・作品①②③ / 予告①②③ の「○」→ 出品済みとして反映\n"
+            "・各月・各表の枠はExcelの内容で置き換えられます\n\n"
+            "取り込みますか？"):
+            return
+        try:
+            res = self.listing_manager.import_excel(path)
+        except Exception as e:
+            messagebox.showerror("取込エラー", f"取り込みに失敗しました:\n{e}")
+            return
+        self.refresh_management_view()
+        months = "、".join(res["months"]) if res["months"] else "なし"
+        messagebox.showinfo(
+            "取込完了",
+            f"取り込みが完了しました。\n\n"
+            f"対象月: {res['sheets']}シート（{months}）\n"
+            f"アカウント: {len(res['accounts'])}件\n"
+            f"サークル名: {res['circle_names']}件\n"
+            f"出品管理表 ○: {res['listing_checks']}件\n"
+            f"予告出品管理 ○: {res['reserved_checks']}件")
+
+    def export_management_excel(self):
+        default = f"出品管理表_{current_ym()}.xlsx"
+        path = filedialog.asksaveasfilename(
+            title="Excelとして書き出し", defaultextension=".xlsx",
+            initialfile=default, filetypes=[("Excel", "*.xlsx")])
+        if not path:
+            return
+        try:
+            excel_export.export_workbook(self.listing_manager, path)
+            messagebox.showinfo("出力完了", f"Excelを書き出しました:\n{path}")
+        except PermissionError:
+            messagebox.showerror(
+                "書き込みできません",
+                "同名のExcelが開かれている可能性があります。\n"
+                "閉じてから再度お試しください。")
+        except Exception as e:
+            messagebox.showerror("エラー", f"Excel出力に失敗しました:\n{e}")
+
+    def send_daily_report_now(self):
+        ym, _ = self._mgmt_ctx()
+        ok = self.listing_manager.send_daily_report(ym)
+        if ok:
+            messagebox.showinfo("送信", "日次レポートをDiscordに送信しました。")
+        else:
+            messagebox.showwarning(
+                "送信できません",
+                "Discord webhook URL が未設定か送信に失敗しました。\n"
+                "設定タブで webhook URL を登録してください。")
+
     def load_groups(self):
         """グループを読み込み"""
         groups = self.ads_api.get_groups()
@@ -2275,6 +2806,51 @@ class FanzaAutoInputApp:
                 self.folders_listbox.delete(0, tk.END)
                 for f in profile.folders:
                     self.folders_listbox.insert(tk.END, f)
+
+    def add_folders_from_parent(self):
+        """親フォルダを選び、その直下のサブフォルダをまとめてベースフォルダ登録
+        （例: FANZA法人完成品 を選ぶと FANZA-AI-001〜006 を一括追加）"""
+        if not hasattr(self, 'selected_profile_for_folder'):
+            messagebox.showwarning("警告", "先にプロファイルを選択してください")
+            return
+
+        parent = filedialog.askdirectory(title="親フォルダを選択（直下のフォルダを一括追加）")
+        if not parent:
+            return
+
+        names = get_subfolders(parent)
+        if not names:
+            messagebox.showwarning("警告", "選択したフォルダの直下にフォルダが見つかりませんでした")
+            return
+
+        # フォルダ名フィルタ（例: "AI" で FANZA-AI-* のみ抽出。空欄なら全て）
+        keyword = simpledialog.askstring(
+            "フォルダ名フィルタ",
+            f"直下に {len(names)} 個のフォルダがあります。\n"
+            "追加対象を絞る文字列を入力（例: AI）。\n空欄のまま OK で全て追加します。",
+            parent=self.root,
+        )
+        if keyword is None:  # キャンセル
+            return
+        keyword = keyword.strip()
+        if keyword:
+            names = [n for n in names if keyword.lower() in n.lower()]
+            if not names:
+                messagebox.showwarning("警告", f"「{keyword}」を含むフォルダが見つかりませんでした")
+                return
+
+        subfolders = [str(Path(parent) / name) for name in names]
+        added = self.profile_manager.add_folders_to_profile(self.selected_profile_for_folder, subfolders)
+        self.refresh_registered_list()
+        profile = self.profile_manager.get_profile(self.selected_profile_for_folder)
+        if profile:
+            self.folders_listbox.delete(0, tk.END)
+            for f in profile.folders:
+                self.folders_listbox.insert(tk.END, f)
+        messagebox.showinfo(
+            "一括追加完了",
+            f"{len(subfolders)}件中 {added}件を追加しました（重複は除外）。",
+        )
 
     def remove_folder(self):
         """フォルダを削除"""

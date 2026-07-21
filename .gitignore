@@ -17,6 +17,13 @@ build/
 *.swp
 *.swo
 
+# 出品管理表 DB（本番データ・マスタ）と生成Excel
+management/*.db
+management/*.db-wal
+management/*.db-shm
+出品管理表_*.xlsx
+予約出品管理表_*.xlsx
+
 # Config with sensitive data / personal data
 config/variables_config.json
 config/keyword_storage.json
