@@ -26,15 +26,10 @@ class FuriganaConverter:
         if api_key and OPENAI_AVAILABLE:
             self.client = OpenAI(api_key=api_key)
 
-        # pykakasiの初期化
+        # pykakasiの初期化（pykakasi 2.1以降の新API）
         self.kakasi = None
         if PYKAKASI_AVAILABLE:
             self.kakasi = pykakasi.kakasi()
-            self.kakasi.setMode("H", "H")  # ひらがな→ひらがな
-            self.kakasi.setMode("K", "H")  # カタカナ→ひらがな
-            self.kakasi.setMode("J", "H")  # 漢字→ひらがな
-            self.kakasi.setMode("r", "Hepburn")  # ローマ字変換方式
-            self.converter = self.kakasi.getConverter()
 
     def set_api_key(self, api_key: str):
         """APIキーを設定"""
@@ -61,8 +56,8 @@ class FuriganaConverter:
             return False, "テキストが空です"
 
         try:
-            # pykakasiで変換
-            result = self.converter.do(text)
+            # pykakasiで変換（新API: convert()はdictのリストを返す）
+            result = "".join(item["hira"] for item in self.kakasi.convert(text))
             return True, result
         except Exception as e:
             return False, f"変換エラー: {e}"
