@@ -206,12 +206,88 @@ class FanzaFormFiller:
         except Exception:
             pass
 
+    # フォームが実際に開いているか判定するための目印（1ステップ目のラジオ）
+    FORM_READY_SELECTOR = "input[name='article_type']"
+
+    def _accept_any_alert(self):
+        """未処理のダイアログ（離脱確認など）があれば承諾して閉じる"""
+        try:
+            self.driver.switch_to.alert.accept()
+        except Exception:
+            pass
+
+    def _form_is_ready(self, timeout: int = 15) -> bool:
+        """フォームの主要素が表示され、入力可能な状態かを確認する。
+
+        単に driver.get した直後は、未ログイン・リダイレクト・離脱確認ダイアログ等で
+        目的のフォームが開いていないことがある。1ステップ目のラジオ(article_type)が
+        実際に存在するまで待ってから入力を始めることで、フォーム未表示のまま入力が
+        進んで「完了」と誤報告されるのを防ぐ。
+        """
+        self._accept_any_alert()
+        try:
+            WebDriverWait(self.driver, timeout).until(
+                EC.presence_of_element_located(
+                    (By.CSS_SELECTOR, self.FORM_READY_SELECTOR)
+                )
+            )
+            return True
+        except Exception:
+            return False
+
+    def _open_form_in_new_tab(self) -> bool:
+        """フォームURLを新しいタブ（最前面）で開く。開けたら True。
+
+        AdsPowerの既存Chromeに debuggerAddress でアタッチすると、Seleniumが
+        操作するタブ(current_window_handle)がユーザーの見ているタブと一致せず、
+        裏のタブに get() してフォームを埋め、画面上は何も変わらないのに「完了」
+        になることがある。必ず新しいタブを開いてそこで操作することで、ユーザーに
+        見える前面タブでフォームを開く。前回入力タブの離脱確認ダイアログも回避できる。
+        """
+        self._accept_any_alert()
+        try:
+            self.driver.switch_to.new_window("tab")
+        except Exception as e:
+            # 新規タブを開けない環境では現在のタブにフォールバック
+            self._report(f"新しいタブを開けませんでした（現在のタブで続行）: {e}")
+            self._accept_any_alert()
+        try:
+            self.driver.get(self.FORM_URL)
+            return True
+        except UnexpectedAlertPresentException:
+            # 離脱確認ダイアログを承諾してから再遷移
+            self._accept_any_alert()
+            try:
+                self.driver.get(self.FORM_URL)
+                return True
+            except Exception as e:
+                self._report(f"フォームページへの遷移に失敗しました: {e}")
+                return False
+        except Exception as e:
+            self._report(f"フォームページへの遷移に失敗しました: {e}")
+            return False
+
     def navigate_to_form(self):
-        """登録フォームページに移動"""
+        """登録フォームページに移動。フォームが開けたら True、開けなければ False。"""
         self._report("フォームページを開いています...")
-        self.driver.get(self.FORM_URL)
-        time.sleep(3)
+        if not self._open_form_in_new_tab():
+            return False
+
+        if not self._form_is_ready():
+            try:
+                cur = self.driver.current_url
+            except Exception:
+                cur = "?"
+            self._report(
+                "フォームが開けませんでした。入力を中止します。\n"
+                f"現在のURL: {cur}\n"
+                "ログイン状態、または前回の入力確認ダイアログが残っていないか"
+                "ご確認ください。"
+            )
+            return False
+
         self._report("フォームページを開きました")
+        return True
 
     def _click_radio(self, name: str, value: str):
         """ラジオボタンを選択"""
@@ -718,9 +794,19 @@ class FanzaFormFiller:
         """フォームに一括入力（全ステップ実行）"""
         self._report("=== 自動入力開始 ===")
 
+        # フォームが開いていない状態で入力を始めて「完了」と誤報告しないよう、
+        # 入力開始前に主要素(article_type)の存在を必ず確認する。
+        if not self._form_is_ready():
+            self._report(
+                "フォームが表示されていないため入力を中止しました。\n"
+                "フォームページが開いているか確認してください。"
+            )
+            return False
+
         try:
             # ステップ1: 作品形式
             if not self.step1_select_article_type(data.get("article_type", "cg")):
+                self._report("作品形式の選択に失敗したため入力を中止しました。")
                 return False
 
             # ステップ2: AI利用の有無
@@ -745,6 +831,12 @@ class FanzaFormFiller:
             # ステップ8: その他
             self.step8_fill_other_info(data)
 
+            # 入力完了後、ページ最上部までスクロールして戻す
+            try:
+                self.driver.execute_script("window.scrollTo({top: 0, behavior: 'smooth'});")
+            except Exception:
+                pass
+
             self._report("=== 自動入力完了 ===")
             return True
 
@@ -759,11 +851,27 @@ class FanzaTrailerFormFiller(FanzaFormFiller):
     FORM_URL = "https://dojin.dmm.co.jp/addtrailer"
 
     def navigate_to_form(self):
-        """予約作品登録フォームページに移動"""
+        """予約作品登録フォームページに移動。開けたら True、開けなければ False。"""
         self._report("予約作品フォームページを開いています...")
-        self.driver.get(self.FORM_URL)
-        time.sleep(3)
+        if not self._open_form_in_new_tab():
+            self._report("予約作品フォームページへの遷移に失敗しました。")
+            return False
+
+        if not self._form_is_ready():
+            try:
+                cur = self.driver.current_url
+            except Exception:
+                cur = "?"
+            self._report(
+                "予約作品フォームが開けませんでした。入力を中止します。\n"
+                f"現在のURL: {cur}\n"
+                "ログイン状態、または前回の入力確認ダイアログが残っていないか"
+                "ご確認ください。"
+            )
+            return False
+
         self._report("予約作品フォームページを開きました")
+        return True
 
     def step7_fill_sales_info(self, data: dict):
         """ステップ7: 販売情報を入力（予約作品用）"""
@@ -859,9 +967,19 @@ class FanzaTrailerFormFiller(FanzaFormFiller):
         """予約作品フォームに一括入力"""
         self._report("=== 予約作品自動入力開始 ===")
 
+        # フォームが開いていない状態で入力を始めて「完了」と誤報告しないよう、
+        # 入力開始前に主要素(article_type)の存在を必ず確認する。
+        if not self._form_is_ready():
+            self._report(
+                "予約作品フォームが表示されていないため入力を中止しました。\n"
+                "フォームページが開いているか確認してください。"
+            )
+            return False
+
         try:
             # ステップ1: 作品形式
             if not self.step1_select_article_type(data.get("article_type", "cg")):
+                self._report("作品形式の選択に失敗したため入力を中止しました。")
                 return False
 
             # ステップ2: AI利用の有無
@@ -885,6 +1003,12 @@ class FanzaTrailerFormFiller(FanzaFormFiller):
 
             # ステップ8: その他（予約作品用）
             self.step8_fill_other_info(data)
+
+            # 入力完了後、ページ最上部までスクロールして戻す
+            try:
+                self.driver.execute_script("window.scrollTo({top: 0, behavior: 'smooth'});")
+            except Exception:
+                pass
 
             self._report("=== 予約作品自動入力完了 ===")
             return True
@@ -1149,18 +1273,20 @@ class FanzaFormalRegistrationFiller(FanzaFormFiller):
             pass
         return titles
 
-    def _find_button_by_title(self, target: str):
-        """一致する作品の配信申請ボタン(<a>)を返す。
+    def _find_button_by_title(self, target: str, href_pattern: str = "/formal_registration/input/"):
+        """一致する作品の編集リンク(<a>)を返す。
 
-        各配信申請リンクについて、同じ作品行内のタイトル（画像alt・詳細リンク）と、
-        作品IDに紐づくタイトルの両方を照合する。予告作品は公開画像/詳細リンクが
-        まだ無いことがあるため、行内タイトルを主、作品IDを従とする。
+        href_pattern（配信申請=/formal_registration/input/、
+        予告編集=/request/input_trailer/ など）を含むリンクごとに、同じ作品行内の
+        タイトル（画像alt・詳細リンク）と作品IDに紐づくタイトルの両方を照合する。
+        予告作品は公開画像/詳細リンクがまだ無いことがあるため、行内タイトルを主、
+        作品IDを従とする。
         """
         if not target:
             return None
         try:
             links = self.driver.find_elements(
-                By.CSS_SELECTOR, "a[href*='/formal_registration/input/']"
+                By.CSS_SELECTOR, f"a[href*='{href_pattern}']"
             )
         except Exception:
             links = []
@@ -1175,7 +1301,7 @@ class FanzaFormalRegistrationFiller(FanzaFormFiller):
                 titles.extend(self._titles_in_element(row))
 
             # 従: 作品IDに紐づくタイトル（公開後の画像/詳細リンク）
-            m = re.search(r"/formal_registration/input/(\d+)", href)
+            m = re.search(re.escape(href_pattern) + r"(\d+)", href)
             if m:
                 titles.extend(self._titles_for_article_id(m.group(1)))
 
@@ -1212,10 +1338,12 @@ class FanzaFormalRegistrationFiller(FanzaFormFiller):
                 return rows
         return []
 
-    def _click_formal_link(self, link, href: str = ""):
-        """配信申請ボタン(<a>)をクリックして配信申請ページへ遷移する。
+    def _click_formal_link(self, link, href: str = "", success_substr: str = "formal_registration"):
+        """編集リンク(<a>)をクリックして対象ページへ遷移する。
 
         まずボタンを実クリックし、遷移しなければhrefへ直接遷移する。
+        success_substr は遷移成否を判定するURLの部分文字列
+        （配信申請=formal_registration、予告編集=input_trailer など）。
         """
         try:
             self.driver.execute_script(
@@ -1226,10 +1354,10 @@ class FanzaFormalRegistrationFiller(FanzaFormFiller):
             time.sleep(3)
             cur = self.driver.current_url or ""
             self._report(f"クリック後のURL: {cur}")
-            if "formal_registration" in cur:
+            if success_substr in cur:
                 return True
         except Exception as e:
-            self._report(f"配信申請ボタンのクリックに失敗しました: {e}")
+            self._report(f"ボタンのクリックに失敗しました: {e}")
 
         # フォールバック: href へ直接遷移
         if href:
@@ -1241,17 +1369,24 @@ class FanzaFormalRegistrationFiller(FanzaFormFiller):
                 time.sleep(3)
                 cur = self.driver.current_url or ""
                 self._report(f"遷移後のURL: {cur}")
-                return "formal_registration" in cur
+                return success_substr in cur
             except Exception as e:
-                self._report(f"配信申請ページへの遷移に失敗しました: {e}")
+                self._report(f"ページへの遷移に失敗しました: {e}")
         return False
 
-    def open_formal_registration_by_title(self, masked_title: str, masked_product: str = "", max_pages: int = 20):
-        """作品管理ページから、選択作品の配信申請ボタンを完全一致で探してクリックし開く。
+    def _open_edit_link_by_title(self, masked_title: str, href_pattern: str,
+                                 success_substr: str, kind_label: str,
+                                 masked_product: str = "", max_pages: int = 20):
+        """作品管理ページから、選択作品の編集リンクを完全一致で探して開く汎用処理。
+
+        href_pattern  : 対象リンクのhref部分文字列
+                        （配信申請=/formal_registration/input/、予告編集=/request/input_trailer/）
+        success_substr: 遷移成功を判定するURLの部分文字列
+        kind_label    : 進捗表示用の名称（「配信申請」「予告編集」など）
 
         Returns:
-            "opened"    : 配信申請ページを開けた
-            "published" : 作品は見つかったが配信申請ボタンが無い（すでに出品済み）
+            "opened"    : 対象ページを開けた
+            "published" : 作品は見つかったが対象リンクが無い（すでに出品済み等）
             "notfound"  : 作品が見つからなかった
         """
         target = self._normalize_title(masked_title)
@@ -1260,20 +1395,20 @@ class FanzaFormalRegistrationFiller(FanzaFormFiller):
         try:
             log_path = Path(__file__).parent.parent / "debug_formal_log.txt"
             with open(log_path, "w", encoding="utf-8") as f:
-                f.write("=== 配信申請 自動オープン ログ ===\n")
+                f.write(f"=== {kind_label} 自動オープン ログ ===\n")
         except Exception:
             pass
 
-        self._report(f"作品管理ページから配信申請ボタンを探しています: {masked_title}")
+        self._report(f"作品管理ページから{kind_label}ボタンを探しています: {masked_title}")
 
         # 前回入力したフォームからの離脱確認ダイアログを承諾しつつ遷移する
         self._safe_get(self.CATALOG_URL)
 
-        # 作品一覧が描画されるまで待つ（配信申請リンク or 商品画像 のいずれか）
+        # 作品一覧が描画されるまで待つ（対象リンク or 商品画像 のいずれか）
         try:
             WebDriverWait(self.driver, 15).until(
                 lambda d: d.find_elements(
-                    By.CSS_SELECTOR, "a[href*='/formal_registration/input/']"
+                    By.CSS_SELECTOR, f"a[href*='{href_pattern}']"
                 ) or d.find_elements(By.CSS_SELECTOR, "a[href*='/detail/']")
             )
         except TimeoutException:
@@ -1291,27 +1426,27 @@ class FanzaFormalRegistrationFiller(FanzaFormFiller):
         seen_title = False
         last_titles: list[str] = []
         for page in range(1, max_pages + 1):
-            # 診断: このページの配信申請リンク件数
+            # 診断: このページの対象リンク件数
             try:
                 _fl = self.driver.find_elements(
-                    By.CSS_SELECTOR, "a[href*='/formal_registration/input/']"
+                    By.CSS_SELECTOR, f"a[href*='{href_pattern}']"
                 )
                 self._report(
-                    f"[{page}ページ目] 配信申請ボタン {len(_fl)}件: "
+                    f"[{page}ページ目] {kind_label}ボタン {len(_fl)}件: "
                     + ", ".join((l.get_attribute("href") or "") for l in _fl[:10])
                 )
             except Exception:
                 pass
 
-            # 1) 一致作品の配信申請ボタンを探す（行内タイトル＋作品IDで照合）→ 開く
-            link = self._find_button_by_title(target)
+            # 1) 一致作品の対象ボタンを探す（行内タイトル＋作品IDで照合）→ 開く
+            link = self._find_button_by_title(target, href_pattern)
             if link is not None:
                 href = link.get_attribute("href") or ""
-                self._report(f"配信申請ボタンをクリックします: {href}")
-                if self._click_formal_link(link, href):
-                    self._report("配信申請ページを開きました")
+                self._report(f"{kind_label}ボタンをクリックします: {href}")
+                if self._click_formal_link(link, href, success_substr):
+                    self._report(f"{kind_label}ページを開きました")
                     return "opened"
-                self._report("配信申請ページを開けませんでした（クリック/遷移失敗）")
+                self._report(f"{kind_label}ページを開けませんでした（クリック/遷移失敗）")
                 return "notfound"
 
             # 2) ボタンは無いが、一致タイトルの作品行が存在するか（＝出品済み判定）
@@ -1329,9 +1464,9 @@ class FanzaFormalRegistrationFiller(FanzaFormFiller):
             self._report(f"次のページを確認中...（{page + 1}ページ目）")
             time.sleep(1.5)
 
-        # 配信申請ボタンは無いが、一致作品行は存在した → すでに出品済み
+        # 対象ボタンは無いが、一致作品行は存在した → すでに出品済み等
         if seen_title:
-            self._report("この作品はすでに出品済みです（配信申請ボタンがありません）")
+            self._report(f"この作品には{kind_label}ボタンがありません（すでに出品済み等）")
             return "published"
 
         # 診断用に作品管理ページを保存し、見つかったタイトルを報告
@@ -1343,6 +1478,23 @@ class FanzaFormalRegistrationFiller(FanzaFormFiller):
             f"ページ上の作品: {shown}"
         )
         return "notfound"
+
+    def open_formal_registration_by_title(self, masked_title: str, masked_product: str = "", max_pages: int = 20):
+        """作品管理ページから、選択作品の配信申請ボタンを完全一致で探してクリックし開く。
+
+        Returns:
+            "opened"    : 配信申請ページを開けた
+            "published" : 作品は見つかったが配信申請ボタンが無い（すでに出品済み）
+            "notfound"  : 作品が見つからなかった
+        """
+        return self._open_edit_link_by_title(
+            masked_title,
+            href_pattern="/formal_registration/input/",
+            success_substr="formal_registration",
+            kind_label="配信申請",
+            masked_product=masked_product,
+            max_pages=max_pages,
+        )
 
     def _go_to_next_catalog_page(self):
         """作品管理ページのページャで次ページへ遷移。次が無ければFalse。"""
@@ -1366,8 +1518,8 @@ class FanzaFormalRegistrationFiller(FanzaFormFiller):
                     continue
         return False
 
-    def _switch_to_formal_registration_tab(self):
-        """開いているタブの中から配信申請ページ(formal_registration)を探して切り替える"""
+    def _switch_to_edit_tab(self, url_substr: str, kind_label: str):
+        """開いているタブの中から url_substr を含むページを探して切り替える"""
         try:
             handles = list(self.driver.window_handles)
         except Exception:
@@ -1379,12 +1531,16 @@ class FanzaFormalRegistrationFiller(FanzaFormFiller):
                 url = self.driver.current_url or ""
             except Exception:
                 continue
-            if "formal_registration" in url:
-                self._report(f"配信申請ページを検出しました: {url}")
+            if url_substr in url:
+                self._report(f"{kind_label}ページを検出しました: {url}")
                 return True
 
-        self._report("配信申請ページのタブが見つかりません。現在のページで入力を試みます。")
+        self._report(f"{kind_label}ページのタブが見つかりません。現在のページで入力を試みます。")
         return False
+
+    def _switch_to_formal_registration_tab(self):
+        """開いているタブの中から配信申請ページ(formal_registration)を探して切り替える"""
+        return self._switch_to_edit_tab("formal_registration", "配信申請")
 
     def _dump_page(self, filename: str = "debug_formal_registration.html"):
         """デバッグ用に現在のページHTMLを保存（セレクタ調整用）"""
@@ -1498,7 +1654,7 @@ class FanzaFormalRegistrationFiller(FanzaFormFiller):
             self._report(f"オプション選択エラー: {e}")
             return False
 
-    def fill_campaign_discount(self, data: dict):
+    def fill_campaign_discount(self, data: dict, on_page_ready=None):
         """配信申請ページのキャンペーン自動参加・割引設定を入力する。
 
         data:
@@ -1510,6 +1666,9 @@ class FanzaFormalRegistrationFiller(FanzaFormFiller):
             release_date_type (str):   配信開始日指定（"1"=最短で公開 / "2"=日付指定）
             masked_title (str):        伏字タイトル。指定時は作品管理ページから
                                        該当作品の配信申請ページを自動で開く。
+        on_page_ready:
+            配信申請ページを開いた直後（フォーム入力前）に self を引数として
+            呼ばれるコールバック。説明文・タイトルの早期チェックに使う。
 
         Returns:
             "done"      : 入力まで完了
@@ -1536,6 +1695,13 @@ class FanzaFormalRegistrationFiller(FanzaFormFiller):
             self._switch_to_formal_registration_tab()
 
         self._dump_page()
+
+        # ページを開いた直後・入力前に、説明文/タイトルの早期チェックを行う
+        if on_page_ready is not None:
+            try:
+                on_page_ready(self)
+            except Exception as e:
+                self._report(f"説明文の早期チェックでエラー: {e}")
 
         # 0. 枚数（file_number）を再取得値で更新して自動入力
         file_number = str(data.get("file_number", "") or "").strip()
@@ -1609,8 +1775,149 @@ class FanzaFormalRegistrationFiller(FanzaFormFiller):
             + ("" if done else "（要確認: 該当項目が見つかりません）")
         )
 
+        # 入力完了後、ページ最上部までスクロールして戻す
+        try:
+            self.driver.execute_script("window.scrollTo({top: 0, behavior: 'smooth'});")
+        except Exception:
+            pass
+
         self._report("=== 配信申請: 入力完了（内容を確認して手動で申請してください） ===")
         return "done"
+
+    def _read_field_value(self, selector: str):
+        """指定セレクタの入力欄の現在値を取得する（JS優先・複数手段）。無ければ ''。"""
+        try:
+            el = self.driver.find_element(By.CSS_SELECTOR, selector)
+        except Exception:
+            self._report(f"入力欄が見つかりません: {selector}")
+            return ""
+        # 1) JSで live value を読む（React/Vue制御フォームに強い）
+        try:
+            val = self.driver.execute_script("return arguments[0].value;", el)
+            if val:
+                return val
+        except Exception:
+            pass
+        # 2) get_attribute('value')
+        try:
+            val = el.get_attribute("value")
+            if val:
+                return val
+        except Exception:
+            pass
+        # 3) textContent / .text
+        try:
+            return el.get_attribute("textContent") or el.text or ""
+        except Exception:
+            return ""
+
+    def read_current_comment(self):
+        """配信申請ページの現在の説明文(comment)を取得する。取得できなければ ''。"""
+        return self._read_field_value("textarea[name='comment']")
+
+    def read_current_title(self):
+        """配信申請ページの現在のタイトル(title)を取得する。取得できなければ ''。"""
+        return self._read_field_value("input[name='title']")
+
+    def rewrite_comment(self, text: str):
+        """説明文(comment)を新しい内容に書き換える。成功で True。"""
+        if self._fill_textarea("comment", text):
+            self._report("説明文を書き換えました。内容を確認して手動で申請してください。")
+            return True
+        self._report("説明文の入力欄が見つかりませんでした（要確認）。")
+        return False
+
+
+class FanzaTrailerEditFiller(FanzaFormalRegistrationFiller):
+    """予告作品の説明文を書き換える「予告編集」ページ入力クラス。
+
+    作品管理ページ（screening/catalog）から伏字タイトルで該当予告作品の
+    「予告編集」リンク(/request/input_trailer/{作品ID})を探して自動で開き、
+    説明文(comment)を新しい内容に書き換える。保存は内容確認のうえ手動で行う。
+    """
+
+    TRAILER_EDIT_HREF = "/request/input_trailer/"
+
+    def open_trailer_edit_by_title(self, masked_title: str, masked_product: str = "", max_pages: int = 20):
+        """作品管理ページから、選択作品の予告編集ボタンを完全一致で探して開く。
+
+        Returns:
+            "opened"    : 予告編集ページを開けた
+            "published" : 作品は見つかったが予告編集ボタンが無い（すでに出品済み等）
+            "notfound"  : 作品が見つからなかった
+        """
+        return self._open_edit_link_by_title(
+            masked_title,
+            href_pattern=self.TRAILER_EDIT_HREF,
+            success_substr="input_trailer",
+            kind_label="予告編集",
+            masked_product=masked_product,
+            max_pages=max_pages,
+        )
+
+    def rewrite_description(self, data: dict):
+        """予告編集ページで説明文(comment)を書き換える。
+
+        data:
+            comment (str):        新しい説明文（必須）
+            masked_title (str):   伏字タイトル。指定時は作品管理ページから予告編集ページを自動オープン。
+            masked_product (str): 伏字商品名（照合補助・任意）
+
+        Returns:
+            "done"     : 説明文の書き換えまで完了（保存は手動）
+            "published": 予告編集ボタンが無い（すでに出品済み等）
+            "notfound" : 予告編集ページが見つからず書き換えできなかった
+            "empty"    : 新しい説明文が空で中止
+        """
+        self._report("=== 予告編集: 説明文の書き換え開始 ===")
+
+        comment = str(data.get("comment", "") or "")
+        if not comment.strip():
+            self._report("新しい説明文が空です。書き換えを中止しました。")
+            return "empty"
+
+        masked_title = str(data.get("masked_title", "") or "").strip()
+        masked_product = str(data.get("masked_product", "") or "").strip()
+        if masked_title:
+            status = self.open_trailer_edit_by_title(masked_title, masked_product)
+            if status == "published":
+                self._report("=== この作品は予告編集できません（すでに出品済み等） ===")
+                return "published"
+            if status != "opened":
+                # 見つからない場合は、すでに開いている予告編集ページがあれば使う
+                if not self._switch_to_edit_tab("input_trailer", "予告編集"):
+                    self._report("=== 予告編集ページが見つからず中止しました ===")
+                    return "notfound"
+        else:
+            # タイトル未指定: すでに開いている予告編集ページに入力する
+            self._switch_to_edit_tab("input_trailer", "予告編集")
+
+        # 予告編集ページに居ることを確認（誤ったページでの書き換えを防ぐ）
+        try:
+            cur = self.driver.current_url or ""
+        except Exception:
+            cur = ""
+        if "input_trailer" not in cur:
+            self._report(
+                f"予告編集ページではないため中止しました（現在URL: {cur or '取得不可'}）"
+            )
+            return "notfound"
+
+        # 診断用に予告編集ページを保存
+        self._dump_page("debug_trailer_edit.html")
+
+        # 説明文(comment)を書き換え（既存値は native setter で置換される）
+        if self._fill_textarea("comment", comment):
+            self._report("説明文を書き換えました。内容を確認して手動で保存してください。")
+            try:
+                self.driver.execute_script("window.scrollTo({top: 0, behavior: 'smooth'});")
+            except Exception:
+                pass
+            self._report("=== 予告編集: 書き換え完了（手動で保存してください） ===")
+            return "done"
+
+        self._report("説明文の入力欄が見つかりませんでした（要確認）。")
+        return "notfound"
 
 
 # テスト用
