@@ -6,7 +6,7 @@ management.sales.SalesReporter と同じで、FANZA由来の月累計を正と�
 その月・そのアカウントに無いぶんだけ日次の合算でおぎなう
 （日次を単純に足すと、途中から取り始めた月やFANZA側の遡り修正でズレるため）。
 
-アカウントの表示名（001（シュオン）など）は config/sales_accounts.json で持つ。
+アカウントの表示名（001（名前）など）は config/sales_accounts.json で持つ。
 accounts.name は FANZA上のサークル名なので、そちらとは別管理にしている。
 """
 import json
@@ -25,7 +25,7 @@ DEFAULT_LABELS = {}
 
 # ── 表示名 ──────────────────────────────────────────────
 def load_labels(path=None) -> dict:
-    """{'001': 'シュオン', ...} を返す。読めなければ既定値。"""
+    """{'001': '名前', ...} を返す。読めなければ既定値。"""
     try:
         data = json.loads(Path(path or CONFIG_PATH).read_text(encoding="utf-8"))
         labels = {str(k): str(v) for k, v in (data.get("labels") or {}).items()}
@@ -35,13 +35,13 @@ def load_labels(path=None) -> dict:
 
 
 def display_label(code: str, labels=None) -> str:
-    """'001（シュオン）' の形。名前が無いアカウントはコードだけ返す。"""
+    """'001（名前）' の形。名前が無いアカウントはコードだけ返す。"""
     name = (labels or {}).get(code, "")
     return f"{code}（{name}）" if name else code
 
 
 def short_label(code: str, labels=None) -> str:
-    """'001 シュオン' の形。表の列見出しなど幅が狭いところ用。"""
+    """'001 名前' の形。表の列見出しなど幅が狭いところ用。"""
     name = (labels or {}).get(code, "")
     return f"{code} {name}" if name else code
 
