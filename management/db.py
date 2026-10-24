@@ -21,15 +21,18 @@ DB_PATH = DB_DIR / "management.db"
 
 TABLE_LISTING = "listing"     # 出品管理表（通常出品）
 TABLE_RESERVED = "reserved"   # 予約出品管理表（予約出品）
+TABLE_SALES = "sales_daily"   # 日別売上（卸金額）
 
 SLOTS_PER_MONTH = 3           # 1アカウント3作品/月
 
 # 配信申請ステータス
+STATUS_LISTED = "出品済"        # 予約出品→配信申請まで済んだ枠（＝完了）
 STATUS_APPLYING = "申請中"
 STATUS_WAITING = "承認待ち"
 STATUS_APPROVED = "承認済み"
 STATUS_REJECTED = "却下"
-STATUS_LIST = ["", STATUS_APPLYING, STATUS_WAITING, STATUS_APPROVED, STATUS_REJECTED]
+STATUS_LIST = ["", STATUS_LISTED, STATUS_APPLYING,
+               STATUS_WAITING, STATUS_APPROVED, STATUS_REJECTED]
 
 # 操作種別（ログ用）
 OP_LISTING = "作品入力"
@@ -146,11 +149,48 @@ def init_db(db_path=None):
                 value TEXT
             );
 
+            -- 日別売上（卸金額）。FANZA売上ページから1日1回取り込む。
+            -- amount は「卸金額（サークル取り分）」の円単位整数。
+            CREATE TABLE IF NOT EXISTS sales_daily (
+                sale_date  TEXT    NOT NULL,   -- 'YYYY-MM-DD'（売上が発生した日）
+                account    TEXT    NOT NULL,   -- アカウントコード（'001' 等）
+                amount     INTEGER NOT NULL,   -- 卸金額（円）
+                fetched_at TEXT,               -- 取得日時
+                PRIMARY KEY (sale_date, account)
+            );
+
+            -- 月累計の卸金額。日次分の足し算ではなく、FANZAの売上ページから
+            -- 「月初〜対象日」の期間で直接取得した値を保存する。途中から使い
+            -- 始めた場合やFANZA側の遡り修正にも追従できる。
+            CREATE TABLE IF NOT EXISTS sales_month (
+                ym         TEXT    NOT NULL,   -- 'YYYY-MM'
+                account    TEXT    NOT NULL,
+                amount     INTEGER NOT NULL,   -- 卸金額の月累計（円）
+                as_of_date TEXT,               -- どの日までの累計か
+                fetched_at TEXT,
+                PRIMARY KEY (ym, account)
+            );
+
+            -- 実際の振込額。FANZAの「支払情報の確認」ページから取り込む。
+            -- 売上（卸金額）は月末締め・翌月20日（休日なら翌平日）払いで、
+            -- 振込額は卸金額から手数料等が引かれた金額になる。
+            CREATE TABLE IF NOT EXISTS sales_payment (
+                sales_ym   TEXT    NOT NULL,   -- 売上の対象月 'YYYY-MM'（8月分なら'2026-08'）
+                account    TEXT    NOT NULL,
+                pay_date   TEXT,               -- 振込日 'YYYY-MM-DD'
+                amount     INTEGER NOT NULL,   -- 支払金額合計（円）
+                carry_over INTEGER NOT NULL DEFAULT 0,  -- 次月繰越（円）
+                status     TEXT,               -- 支払結果（'支払い完了' 等）
+                fetched_at TEXT,
+                PRIMARY KEY (sales_ym, account)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_slots_ym_type
                 ON slots (ym, table_type);
             CREATE INDEX IF NOT EXISTS idx_slots_title
                 ON slots (product_title);
             CREATE INDEX IF NOT EXISTS idx_logs_ts ON logs (ts);
+            CREATE INDEX IF NOT EXISTS idx_sales_date ON sales_daily (sale_date);
             """
         )
         # 既存DBへの name 列マイグレーション（無ければ追加）
@@ -256,6 +296,17 @@ def get_slots(ym: str, account: str, table_type: str, db_path=None):
     return [dict(r) for r in rows]
 
 
+def get_account_slots(account: str, table_type: str, db_path=None):
+    """指定アカウント・表の全月の枠を返す（月をまたぐタイトル突合に使う）。"""
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM slots WHERE account=? AND table_type=? "
+            "ORDER BY ym, slot_no",
+            (account, table_type),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def get_month_rows(ym: str, table_type: str, db_path=None):
     with connect(db_path) as conn:
         rows = conn.execute(
@@ -326,4 +377,107 @@ def query_logs(limit=200, account=None, ym=None, db_path=None):
             f"SELECT * FROM logs {clause} ORDER BY id DESC LIMIT ?",
             (*params, limit),
         ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── sales_daily（日別売上・卸金額） ──────────────────────
+def upsert_sales(sale_date: str, account: str, amount: int, db_path=None):
+    """1アカウント・1日分の卸金額を登録（再取得したら上書き）。"""
+    with connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO sales_daily (sale_date, account, amount, fetched_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(sale_date, account) DO UPDATE SET "
+            "amount=excluded.amount, fetched_at=excluded.fetched_at",
+            (sale_date, account, int(amount), now_iso()),
+        )
+
+
+def get_sales_day(sale_date: str, db_path=None) -> dict:
+    """{account: amount} を返す（その日に記録が無ければ空dict）。"""
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT account, amount FROM sales_daily WHERE sale_date=?", (sale_date,)
+        ).fetchall()
+    return {r["account"]: r["amount"] for r in rows}
+
+
+def get_sales_month(ym: str, db_path=None) -> dict:
+    """指定年月('YYYY-MM')のアカウント別累計 {account: amount} を返す。"""
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT account, SUM(amount) AS total FROM sales_daily "
+            "WHERE substr(sale_date, 1, 7)=? GROUP BY account",
+            (ym,),
+        ).fetchall()
+    return {r["account"]: r["total"] for r in rows}
+
+
+def sales_recorded_accounts(sale_date: str, db_path=None) -> set:
+    """その日の取得が済んでいるアカウントコードの集合。"""
+    return set(get_sales_day(sale_date, db_path).keys())
+
+
+def get_sales_days_in_month(ym: str, db_path=None) -> dict:
+    """指定年月の日別合計 {'YYYY-MM-DD': amount} を返す（日次推移の確認用）。"""
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT sale_date, SUM(amount) AS total FROM sales_daily "
+            "WHERE substr(sale_date, 1, 7)=? GROUP BY sale_date ORDER BY sale_date",
+            (ym,),
+        ).fetchall()
+    return {r["sale_date"]: r["total"] for r in rows}
+
+
+def upsert_sales_month(ym: str, account: str, amount: int, as_of_date: str, db_path=None):
+    """FANZAの売上ページから取得した月累計を保存（同じ月なら上書き）。"""
+    with connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO sales_month (ym, account, amount, as_of_date, fetched_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(ym, account) DO UPDATE SET "
+            "amount=excluded.amount, as_of_date=excluded.as_of_date, "
+            "fetched_at=excluded.fetched_at "
+            # 過去日を指定して再実行しても、より新しい時点の累計を巻き戻さない
+            "WHERE excluded.as_of_date >= sales_month.as_of_date",
+            (ym, account, int(amount), as_of_date, now_iso()),
+        )
+
+
+def get_sales_month_reported(ym: str, db_path=None) -> dict:
+    """FANZA由来の月累計 {account: amount} を返す。"""
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT account, amount FROM sales_month WHERE ym=?", (ym,)
+        ).fetchall()
+    return {r["account"]: r["amount"] for r in rows}
+
+
+# ── sales_payment（実際の振込額） ─────────────────────────
+def upsert_sales_payment(sales_ym: str, account: str, pay_date: str, amount: int,
+                         carry_over: int = 0, status: str = "", db_path=None):
+    """1アカウント・1ヶ月分の振込実績を保存（再取得したら上書き）。"""
+    with connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO sales_payment "
+            "(sales_ym, account, pay_date, amount, carry_over, status, fetched_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(sales_ym, account) DO UPDATE SET "
+            "pay_date=excluded.pay_date, amount=excluded.amount, "
+            "carry_over=excluded.carry_over, status=excluded.status, "
+            "fetched_at=excluded.fetched_at",
+            (sales_ym, account, pay_date, int(amount), int(carry_over or 0),
+             status or "", now_iso()),
+        )
+
+
+def get_sales_payments(sales_ym: str = None, db_path=None) -> list:
+    """振込実績の行（dict）を返す。sales_ym を指定するとその月分だけ。"""
+    sql = "SELECT * FROM sales_payment"
+    params = ()
+    if sales_ym:
+        sql += " WHERE sales_ym=?"
+        params = (sales_ym,)
+    with connect(db_path) as conn:
+        rows = conn.execute(sql + " ORDER BY sales_ym, account", params).fetchall()
     return [dict(r) for r in rows]

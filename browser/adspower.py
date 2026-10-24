@@ -2,6 +2,7 @@
 AdsPower連携モジュール
 AdsPowerのLocal APIを使用してブラウザを制御します
 """
+import os
 import requests
 import time
 from selenium import webdriver
@@ -12,13 +13,20 @@ from selenium.webdriver.chrome.options import Options
 class AdsPowerAPI:
     """AdsPower API クライアント"""
 
-    def __init__(self, api_url: str = "http://127.0.0.1:50325"):
+    def __init__(self, api_url: str = "http://127.0.0.1:50325", api_key: str = ""):
         self.api_url = api_url.rstrip("/")
+        self.api_key = api_key
+
+    def _headers(self) -> dict:
+        """AdsPower 8.x 以降はLocal APIにもAPIキー認証が必要（設定→APIで発行）"""
+        if self.api_key:
+            return {"Authorization": f"Bearer {self.api_key}"}
+        return {}
 
     def check_connection(self) -> tuple[bool, str]:
         """API接続確認"""
         try:
-            response = requests.get(f"{self.api_url}/status", timeout=5)
+            response = requests.get(f"{self.api_url}/status", timeout=5, headers=self._headers())
             if response.status_code == 200:
                 return True, "Connected"
             return False, f"Status: {response.status_code}"
@@ -35,7 +43,9 @@ class AdsPowerAPI:
         last_data: dict = {}
         backoff = self.RATE_LIMIT_SEC
         for attempt in range(max_retries):
-            response = requests.get(f"{self.api_url}{endpoint}", params=params, timeout=10)
+            response = requests.get(
+                f"{self.api_url}{endpoint}", params=params, timeout=10, headers=self._headers()
+            )
             last_data = response.json() or {}
             if last_data.get("code") == 0:
                 return last_data
@@ -102,13 +112,17 @@ class AdsPowerAPI:
             print(f"Get profiles error: {e}")
             return []
 
-    def start_browser(self, profile_id: str) -> tuple[bool, dict]:
-        """ブラウザを起動"""
+    def start_browser(self, profile_id: str, headless: bool = False) -> tuple[bool, dict]:
+        """ブラウザを起動（headless=True でウィンドウを表示せずに起動）"""
         try:
+            params = {"user_id": profile_id}
+            if headless:
+                params["headless"] = "1"
             response = requests.get(
                 f"{self.api_url}/api/v1/browser/start",
-                params={"user_id": profile_id},
-                timeout=30
+                params=params,
+                timeout=30,
+                headers=self._headers()
             )
             data = response.json()
 
@@ -124,7 +138,8 @@ class AdsPowerAPI:
             response = requests.get(
                 f"{self.api_url}/api/v1/browser/stop",
                 params={"user_id": profile_id},
-                timeout=10
+                timeout=10,
+                headers=self._headers()
             )
             data = response.json()
             return data.get("code") == 0
@@ -138,7 +153,8 @@ class AdsPowerAPI:
             response = requests.get(
                 f"{self.api_url}/api/v1/browser/active",
                 params={"user_id": profile_id},
-                timeout=10
+                timeout=10,
+                headers=self._headers()
             )
             data = response.json()
             if data.get("code") == 0:
@@ -151,41 +167,61 @@ class AdsPowerAPI:
 class AdsPowerBrowser:
     """AdsPowerブラウザ管理クラス"""
 
-    def __init__(self, api: AdsPowerAPI = None):
+    def __init__(self, api: AdsPowerAPI = None, headless: bool = False):
         self.api = api or AdsPowerAPI()
         self.driver = None
         self.profile_id = None
+        self.last_error = ""  # 直近の起動失敗理由（GUI表示・診断用）
+        self.headless = headless  # True でウィンドウを出さずに起動（定時実行用）
 
-    def start(self, profile_id: str) -> bool:
-        """指定したプロファイルでブラウザを起動してSeleniumで接続"""
-        success, data = self.api.start_browser(profile_id)
-
+    def _connect_once(self, profile_id: str) -> bool:
+        """1回分: AdsPower起動→Selenium接続。失敗時は self.last_error に理由を残す。"""
+        success, data = self.api.start_browser(profile_id, headless=self.headless)
         if not success:
-            print(f"Browser start failed: {data.get('error')}")
+            self.last_error = f"AdsPower起動API失敗: {data.get('error')}"
             return False
 
         try:
-            # WebDriver接続情報を取得
             ws_endpoint = data["ws"]["selenium"]
             webdriver_path = data["webdriver"]
+        except (KeyError, TypeError):
+            self.last_error = f"AdsPower応答に接続情報がありません: {data}"
+            return False
 
-            # Seleniumで接続
+        # AdsPowerがChromeカーネル更新直後などで chromedriver がまだ用意されていないケース
+        if not webdriver_path or not os.path.exists(webdriver_path):
+            self.last_error = (
+                f"chromedriverが見つかりません（AdsPowerの更新中/準備未完了の可能性）: {webdriver_path}"
+            )
+            return False
+
+        try:
             options = Options()
             options.add_experimental_option(
                 "debuggerAddress",
                 ws_endpoint.replace("ws://", "").split("/")[0]
             )
-
             service = Service(executable_path=webdriver_path)
             self.driver = webdriver.Chrome(service=service, options=options)
             self.profile_id = profile_id
-
+            self.last_error = ""
             print(f"Browser connected: {profile_id}")
             return True
-
         except Exception as e:
-            print(f"Selenium connection error: {e}")
+            self.last_error = f"Selenium接続エラー: {e}"
+            print(self.last_error)
             return False
+
+    def start(self, profile_id: str, retries: int = 2) -> bool:
+        """指定したプロファイルでブラウザを起動してSeleniumで接続（一過性失敗はリトライ）"""
+        self.last_error = ""
+        for attempt in range(retries + 1):
+            if self._connect_once(profile_id):
+                return True
+            print(f"Browser start failed (attempt {attempt + 1}/{retries + 1}): {self.last_error}")
+            if attempt < retries:
+                time.sleep(2.0)  # 更新直後・レート制限などの一過性失敗を待って再試行
+        return False
 
     def stop(self):
         """ブラウザを終了"""
@@ -213,7 +249,13 @@ class AdsPowerBrowser:
 
 # テスト用
 if __name__ == "__main__":
-    api = AdsPowerAPI()
+    import json
+    from pathlib import Path
+
+    # 保存済み設定（config/profiles_config.json）からURLとAPIキーを読む
+    cfg_path = Path(__file__).parent.parent / "config" / "profiles_config.json"
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
+    api = AdsPowerAPI(cfg.get("api_url", "http://127.0.0.1:50325"), cfg.get("api_key", ""))
 
     # 接続確認
     connected, msg = api.check_connection()

@@ -30,6 +30,8 @@ config/keyword_storage.json
 config/profiles_config.json
 config/circle_names.json
 config/series_storage.json
+config/sales_accounts.json
+config/sales_web.json
 config/templates/
 
 # Debug dumps and helper scripts (may contain personal/product data)
@@ -54,3 +56,6 @@ Thumbs.db
 
 # Claude Code local settings
 .claude/
+
+# Web公開（GitHub Pages）の作業用クローン
+.publish/
