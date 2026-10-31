@@ -18,7 +18,7 @@
   python sales_daily.py --profile FANZA-001 --dry-run --no-retry   # 動作確認
   python sales_daily.py --force             # 通知済みでも再通知する
 
-終了コード: 0=全件取得して通知 / 1=一部未取得 / 2=エラー
+終了コード: 0=全件取得して通知 / 1=一部未取得 / 2=エラー（別の取得処理が実行中を含む）
 """
 import argparse
 import contextlib
@@ -85,6 +85,32 @@ def keep_awake():
                 log("スリープ抑止: 解除")
             except Exception:
                 pass
+
+
+LOCK_PATH = BASE / "logs" / "sales_browser.lock"
+_lock_handle = None
+
+
+def acquire_browser_lock() -> bool:
+    """AdsPowerのブラウザを使う売上系の処理（集計・振込額）を同時に1本だけにする。
+
+    朝の実行がリトライ待ちのまま12:30の第2トリガが起動すると、2本が同じ
+    ブラウザを取り合い、単日の欄に月累計が記録されることがあった。
+    タスクの MultipleInstances は vbs の非同期起動で即終了するため効かない。
+    ロックはファイルハンドルに紐づくので、プロセスが落ちても自動で外れる。
+    """
+    global _lock_handle
+    import msvcrt
+    LOCK_PATH.parent.mkdir(exist_ok=True)
+    f = open(LOCK_PATH, "a+")
+    try:
+        f.seek(0)
+        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError:
+        f.close()
+        return False
+    _lock_handle = f  # プロセス終了まで握ったままにする
+    return True
 
 
 def sleep_until(deadline_ts: float) -> float:
@@ -309,6 +335,10 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="Discordに送らない")
     ap.add_argument("--force", action="store_true", help="通知済みでも再通知する")
     args = ap.parse_args()
+
+    if not acquire_browser_lock():
+        log("別の売上取得処理が実行中のため終了します（二重起動防止）")
+        return 2
 
     target = date.fromisoformat(args.date) if args.date else yesterday()
     cfg = sales_scraper.load_config()

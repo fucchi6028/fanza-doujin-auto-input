@@ -33,7 +33,8 @@ BASE = Path(__file__).parent
 sys.path.insert(0, str(BASE))
 
 import sales_daily
-from sales_daily import (fetch_one, keep_awake, load_profiles, log, sleep_until)
+from sales_daily import (acquire_browser_lock, fetch_one, keep_awake, load_profiles,
+                         log, sleep_until)
 from browser import sales_scraper
 from browser.adspower import AdsPowerAPI
 from management import db, payment
@@ -157,6 +158,11 @@ def main(stack: contextlib.ExitStack) -> int:
     if not args.now and today == pay and datetime.now() < check_at:
         log(f"振込額が載るのは{check_at:%H:%M}ごろのため、それまで待ちます")
         sleep_until(check_at.timestamp())
+
+    # 16時待ちの間は握らない（朝の売上集計を止めないため）。ブラウザを使う直前に取る
+    if not acquire_browser_lock():
+        log("売上集計が実行中のため終了します（二重起動防止・翌日の実行で続きを取得）")
+        return 2
 
     interval = int(cfg.get("payment_retry_minutes", 30)) * 60
     limit = hhmm_today(cfg.get("payment_retry_until"), "23:30")
