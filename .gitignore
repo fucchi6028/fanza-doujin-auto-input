@@ -54,3 +54,11 @@ Thumbs.db
 
 # Claude Code local settings
 .claude/
+
+# ローカル起動用Chromeプロファイル（ログイン情報を含む・大容量）
+browser/local_profiles/
+
+# 手動バックアップ・一時スクリプト
+*.bak_*
+management/*.db.bak*
+_tmp_*.py
