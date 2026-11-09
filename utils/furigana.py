@@ -17,6 +17,28 @@ except ImportError:
     OPENAI_AVAILABLE = False
 
 
+def sanitize_ruby(text: str) -> str:
+    """FANZAのふりがな欄で受け付けられる文字だけに整える。
+
+    FANZAのふりがな(title_ruby)は「ひらがな」と長音「ー」しか受け付けず、
+    カタカナ・空白・「・」・数字・英字・記号が1文字でもあると確認画面へ進めない
+    （しかもどの項目がエラーか表示されない）。カタカナはひらがなに変換し、
+    それ以外の受け付けられない文字は取り除く。
+    """
+    if not text:
+        return ""
+    import unicodedata
+    s = unicodedata.normalize("NFKC", str(text))  # 半角カナ→全角カナ等
+    out = []
+    for ch in s:
+        code = ord(ch)
+        if 0x30A1 <= code <= 0x30F6:  # カタカナ → ひらがな
+            ch = chr(code - 0x60)
+        if "ぁ" <= ch <= "ゖ" or ch == "ー":
+            out.append(ch)
+    return "".join(out)
+
+
 class FuriganaConverter:
     """ふりがな変換クラス"""
 
@@ -58,7 +80,7 @@ class FuriganaConverter:
         try:
             # pykakasiで変換（新API: convert()はdictのリストを返す）
             result = "".join(item["hira"] for item in self.kakasi.convert(text))
-            return True, result
+            return True, sanitize_ruby(result)
         except Exception as e:
             return False, f"変換エラー: {e}"
 
@@ -110,7 +132,7 @@ class FuriganaConverter:
                 max_tokens=500,
             )
 
-            furigana = response.choices[0].message.content.strip()
+            furigana = sanitize_ruby(response.choices[0].message.content.strip())
             return True, furigana
 
         except Exception as e:

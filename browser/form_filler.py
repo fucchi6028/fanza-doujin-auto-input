@@ -1021,6 +1021,14 @@ class FanzaFormFiller:
             time.sleep(1.5)  # ふりがなフィールドが有効になるまで待機（React再レンダリング待ち）
 
         # ふりがな
+        # FANZAはひらがな・「ー」以外を含むと確認画面へ進めない（エラー箇所も表示されない）ため、
+        # 入力前に受け付けられる文字だけに整える。元の data は書き換えない。
+        if data.get("title_ruby"):
+            from utils.furigana import sanitize_ruby
+            ruby = sanitize_ruby(data["title_ruby"])
+            if ruby != data["title_ruby"]:
+                self._report("ふりがなからFANZAで使えない文字（記号・英数字・空白・カタカナ等）を除去/変換しました")
+            data = dict(data, title_ruby=ruby)
         if data.get("title_ruby"):
             furigana_filled = False
 
