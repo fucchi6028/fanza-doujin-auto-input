@@ -1,0 +1,690 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1a1a2e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="robots" content="noindex, nofollow">
+<title>売上ボード</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💰</text></svg>">
+<style>
+  :root{
+    --bg:#1a1a2e; --bg2:#16213e; --bg3:#0f3460;
+    --fg:#eaeaea; --fg2:#a0a0a0;
+    --accent:#e94560; --success:#00d9a0; --warn:#ffc107; --blue:#4d96ff;
+    --radius:14px;
+  }
+  *{box-sizing:border-box}
+  /* display 指定のある要素にも hidden 属性を効かせる */
+  [hidden]{display:none !important}
+  html,body{margin:0;padding:0}
+  body{
+    background:var(--bg); color:var(--fg);
+    font-family:"Hiragino Sans","Hiragino Kaku Gothic ProN","Noto Sans JP","Meiryo",system-ui,sans-serif;
+    -webkit-text-size-adjust:100%;
+    padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  .wrap{max-width:720px;margin:0 auto;padding:14px 14px 40px}
+
+  /* ── 合言葉の入力画面 ── */
+  #lock{min-height:80vh;display:flex;align-items:center;justify-content:center}
+  #lock .box{width:100%;max-width:340px;background:var(--bg2);border:1px solid var(--bg3);
+    border-radius:var(--radius);padding:26px 22px;text-align:center}
+  #lock h1{font-size:19px;margin:0 0 6px}
+  #lock p{color:var(--fg2);font-size:12px;margin:0 0 18px}
+  input[type=password]{width:100%;padding:13px;border-radius:10px;border:1px solid var(--bg3);
+    background:var(--bg);color:var(--fg);font-size:16px;text-align:center;letter-spacing:.08em}
+  button{font-family:inherit;cursor:pointer}
+  .btn{width:100%;margin-top:12px;padding:13px;border:0;border-radius:10px;
+    background:var(--accent);color:#fff;font-size:15px;font-weight:700}
+  .btn:active{opacity:.8}
+  .remember{display:flex;align-items:center;justify-content:center;gap:6px;
+    margin-top:14px;color:var(--fg2);font-size:12px}
+  .err{color:var(--accent);font-size:12px;min-height:16px;margin-top:10px}
+
+  /* ── ヘッダー ── */
+  header{display:flex;align-items:flex-end;justify-content:space-between;gap:10px;margin-bottom:12px}
+  header h1{font-size:18px;margin:0;color:var(--accent)}
+  header .sub{font-size:11px;color:var(--fg2);margin-top:3px}
+  .icon-btn{background:var(--bg2);border:1px solid var(--bg3);color:var(--fg);
+    border-radius:10px;padding:8px 12px;font-size:12px}
+
+  /* ── KPI ── */
+  .kpis{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px}
+  .kpi{background:var(--bg2);border:1px solid var(--bg3);border-radius:var(--radius);
+    padding:12px 13px;border-top:3px solid var(--c,var(--accent))}
+  .kpi .t{font-size:11px;color:var(--fg2)}
+  .kpi .v{font-size:min(7.2vw,26px);font-weight:700;color:var(--c,var(--accent));margin:3px 0 2px;
+    letter-spacing:-.02em;white-space:nowrap}
+  .kpi .n{font-size:10px;color:var(--fg2)}
+
+  /* ── 月セレクタ／タブ ── */
+  .bar{display:flex;gap:8px;align-items:center;margin-bottom:12px}
+  select{flex:0 0 auto;background:var(--bg2);color:var(--fg);border:1px solid var(--bg3);
+    border-radius:10px;padding:9px 10px;font-size:14px;font-family:inherit}
+  .tabs{display:flex;background:var(--bg2);border:1px solid var(--bg3);border-radius:10px;
+    padding:3px;flex:1 1 auto}
+  .tabs button{flex:1;border:0;background:transparent;color:var(--fg2);
+    padding:8px 4px;border-radius:8px;font-size:13px}
+  .tabs button[aria-selected=true]{background:var(--accent);color:#fff;font-weight:700}
+  .tabs button,.icon-btn{white-space:nowrap}
+  /* 狭い画面ではタブ4つが収まらないので、月の選択とタブを2段にする */
+  @media (max-width:440px){
+    .bar{flex-wrap:wrap}
+    .bar select,.bar .tabs{flex:1 1 100%}
+  }
+
+  /* ── 一覧 ── */
+  .card{background:var(--bg2);border:1px solid var(--bg3);border-radius:var(--radius);
+    overflow:hidden;margin-bottom:12px}
+  .card h2{font-size:12px;color:var(--fg2);font-weight:600;margin:0;padding:12px 14px 0}
+  .row{display:flex;align-items:center;gap:10px;padding:11px 14px;border-top:1px solid #1e2b4d}
+  .row:first-of-type{border-top:0}
+  .row .name{flex:1 1 auto;min-width:0;font-size:14px}
+  .row .name small{display:block;color:var(--fg2);font-size:10px;margin-top:2px}
+  .row .val{flex:0 0 auto;text-align:right;font-size:15px;font-weight:700;white-space:nowrap}
+  .row .val small{display:block;font-size:10px;font-weight:400;color:var(--fg2);margin-top:2px}
+  .barline{height:5px;border-radius:3px;background:#22305a;margin-top:6px;overflow:hidden}
+  .barline i{display:block;height:100%;border-radius:3px}
+  .up{color:var(--success)} .down{color:var(--accent)} .flat{color:var(--fg2)}
+  .total-row{background:var(--bg3)}
+  .total-row .name,.total-row .val{font-weight:700}
+
+  details.day summary{list-style:none;cursor:pointer}
+  details.day summary::-webkit-details-marker{display:none}
+  details.day[open] .chev{transform:rotate(90deg)}
+  .chev{display:inline-block;color:var(--fg2);font-size:11px;transition:transform .15s}
+  .breakdown{padding:2px 14px 12px 14px;background:#131d38}
+  .breakdown div{display:flex;justify-content:space-between;font-size:12px;
+    color:var(--fg2);padding:3px 0}
+  .breakdown b{color:var(--fg);font-weight:600}
+
+  .chart{padding:12px 10px 6px}
+  .chart svg{width:100%;height:120px;display:block}
+  .row .val small b{color:var(--fg);font-weight:700;font-size:12px}
+  .note{padding:10px 14px 12px;color:var(--fg2);font-size:11px;line-height:1.6}
+  .pay-kpis{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px}
+  .pay-kpis .wide{grid-column:1 / -1}
+  .empty{padding:26px 14px;text-align:center;color:var(--fg2);font-size:13px}
+  .stale{width:100%;margin:0 0 12px;padding:11px;border:1px solid var(--warn);border-radius:10px;
+    background:rgba(255,193,7,.12);color:var(--warn);font-size:13px;font-weight:700}
+  .caption{color:var(--fg2);font-size:10px;margin:-6px 2px 12px}
+  .n .up,.n .down,.n .flat{font-weight:700}
+  .row .val small.cmp{font-size:11px}
+  .wkd-sat{color:var(--blue)} .wkd-sun{color:#ff8c42}
+  .legend{display:flex;flex-wrap:wrap;gap:4px 12px;padding:0 14px 10px;font-size:10px;color:var(--fg2)}
+  .legend i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:4px;vertical-align:0}
+  .legend b{color:var(--fg)}
+
+  /* 振込：予想/確定 */
+  .badge{display:inline-block;font-size:10px;font-weight:700;padding:2px 7px;border-radius:6px;
+    vertical-align:1px;margin-left:6px}
+  .b-conf{background:rgba(0,217,160,.16);color:var(--success)}
+  .b-fc{background:rgba(255,193,7,.16);color:var(--warn)}
+  .status{padding:12px 14px}
+  .status .head{font-size:15px;font-weight:700}
+  .status .desc{font-size:11px;color:var(--fg2);margin-top:4px;line-height:1.6}
+  .status.fc{background:rgba(255,193,7,.08)}
+  .status.conf{background:rgba(0,217,160,.08)}
+  .frow{display:flex;align-items:center;justify-content:space-between;gap:10px;
+    padding:10px 14px;border-top:1px solid #1e2b4d}
+  .frow .k{font-size:13px;min-width:0}
+  .frow .k small{display:block;font-size:10px;color:var(--fg2);margin-top:2px}
+  .frow .k .tw{color:#5a6a95;margin-right:5px}
+  .frow b{font-size:16px;white-space:nowrap}
+  .frow.top b{font-size:24px;color:var(--success)}
+  .frow.l1{padding-left:18px} .frow.l2{padding-left:36px}
+  .frow.hl{background:#131d38}
+  .frow.hl b{font-size:20px;color:var(--accent)}
+  .frow.hl.p2 b{color:#b980f0}
+  .frow.owner b{color:var(--warn)}
+  .fcnum{opacity:.85}
+  footer{text-align:center;color:var(--fg2);font-size:10px;margin-top:16px;line-height:1.7}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <!-- 合言葉 -->
+  <section id="lock">
+    <div class="box">
+      <div style="font-size:30px">🔒</div>
+      <h1>売上ボード</h1>
+      <p>合言葉を入力してください</p>
+      <form id="lockForm">
+        <input type="password" id="pass" autocomplete="current-password"
+               inputmode="text" placeholder="合言葉">
+        <button class="btn" type="submit">表示する</button>
+      </form>
+      <label class="remember"><input type="checkbox" id="remember" checked>この端末に記憶する</label>
+      <div class="err" id="lockErr"></div>
+    </div>
+  </section>
+
+  <!-- ダッシュボード -->
+  <section id="app" hidden>
+    <header>
+      <div>
+        <h1>💰 売上ボード</h1>
+        <div class="sub" id="updated"></div>
+      </div>
+      <button class="icon-btn" id="reload">🔄 更新</button>
+    </header>
+
+    <button class="stale" id="stale" hidden>新しい画面があります。タップして読み込み直す</button>
+
+    <div id="salesKpis">
+      <div class="kpis">
+        <div class="kpi" style="--c:var(--success)">
+          <div class="t" id="tTotal">累計売上</div><div class="v" id="kTotal">―</div><div class="n" id="nTotal"></div>
+        </div>
+        <div class="kpi" style="--c:var(--accent)">
+          <div class="t" id="tMonth">月の売上</div><div class="v" id="kMonth">―</div><div class="n" id="nMonth"></div>
+        </div>
+        <div class="kpi" style="--c:var(--warn)">
+          <div class="t" id="tDay">最新日の売上</div><div class="v" id="kDay">―</div><div class="n" id="nDay"></div>
+        </div>
+        <div class="kpi" style="--c:var(--blue)">
+          <div class="t" id="tAvg">1日平均</div><div class="v" id="kAvg">―</div><div class="n" id="nAvg"></div>
+        </div>
+      </div>
+      <div class="caption">※ 売上はすべて卸金額（実際の入金額は「振込」タブ）</div>
+    </div>
+
+    <div class="bar">
+      <select id="ym"></select>
+      <div class="tabs" role="tablist">
+        <button role="tab" data-tab="acc" aria-selected="true">アカウント別</button>
+        <button role="tab" data-tab="day" aria-selected="false">日別</button>
+        <button role="tab" data-tab="mon" aria-selected="false">月別</button>
+        <button role="tab" data-tab="pay" aria-selected="false">振込</button>
+      </div>
+    </div>
+
+    <div id="view"></div>
+
+    <footer>
+      売上＝卸金額（サークル取り分）。毎朝の自動取得後に更新<br>
+      振込は振込日の16時ごろに実額を取得して「確定」になります<br>
+      <span id="foot"></span>
+    </footer>
+  </section>
+</div>
+
+<script>
+"use strict";
+const STORE_KEY = "sales-board-pass";
+// 公開時に sales_publish.py が版（ハッシュ）に置き換える
+const PAGE_REV = "__PAGE_REV__";
+let DATA = null, TAB = "acc";
+
+const $ = id => document.getElementById(id);
+const yen = n => "¥" + Math.round(n || 0).toLocaleString("ja-JP");
+const ymLabel = ym => ym ? ym.slice(0, 4) + "/" + ym.slice(5, 7) : "―";
+const WD = ["月", "火", "水", "木", "金", "土", "日"];
+
+// ── 集計（デスクトップ版 SalesStats と同じ考え方） ──
+const monthAmounts = ym => (DATA.months[ym] || {});
+const monthTotal = ym => Object.values(monthAmounts(ym)).reduce((a, b) => a + b, 0);
+const dayAmounts = d => (DATA.daily[d] || {});
+const dayTotal = d => Object.values(dayAmounts(d)).reduce((a, b) => a + b, 0);
+const monthList = () => Object.keys(DATA.months).sort();
+const daysOfMonth = ym => Object.keys(DATA.daily).filter(d => d.startsWith(ym)).sort();
+const accountTotal = a => monthList().reduce((s, ym) => s + (monthAmounts(ym)[a] || 0), 0);
+const grandTotal = () => monthList().reduce((s, ym) => s + monthTotal(ym), 0);
+const label = a => DATA.labels[a] ? a + "（" + DATA.labels[a] + "）" : a;
+
+function prevYm(ym){
+  const y = +ym.slice(0, 4), m = +ym.slice(5, 7);
+  return m === 1 ? (y - 1) + "-12" : y + "-" + String(m - 1).padStart(2, "0");
+}
+function dayAverage(ym){
+  const days = daysOfMonth(ym);
+  return days.length ? Math.round(monthTotal(ym) / days.length) : 0;
+}
+const color = i => ["#e94560","#00d9a0","#ffc107","#4d96ff","#b980f0","#ff8c42","#2ec4b6",
+                   "#f06595","#74c0fc","#a9e34b"][i % 10];
+
+// ── 復号（PBKDF2-SHA256 → AES-GCM） ──
+const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+
+async function decrypt(blob, pass){
+  const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(pass),
+                                             "PBKDF2", false, ["deriveKey"]);
+  const key = await crypto.subtle.deriveKey(
+    {name: "PBKDF2", salt: b64(blob.salt), iterations: blob.iterations, hash: "SHA-256"},
+    base, {name: "AES-GCM", length: 256}, false, ["decrypt"]);
+  const plain = await crypto.subtle.decrypt({name: "AES-GCM", iv: b64(blob.iv)},
+                                            key, b64(blob.ciphertext));
+  return JSON.parse(new TextDecoder().decode(plain));
+}
+
+async function loadData(pass){
+  const res = await fetch("data.json?t=" + Date.now(), {cache: "no-store"});
+  if (!res.ok) throw new Error("データを取得できませんでした（" + res.status + "）");
+  return await decrypt(await res.json(), pass);
+}
+
+// ── 月の途中かどうか・前月との比較 ──
+function monthEnd(ym){
+  const y = +ym.slice(0, 4), m = +ym.slice(5, 7);
+  return ym + "-" + String(new Date(y, m, 0).getDate()).padStart(2, "0");
+}
+const daysInMonth = ym => +monthEnd(ym).slice(8);
+const isComplete = ym => !!DATA.latest_date && DATA.latest_date >= monthEnd(ym);
+const md = d => +d.slice(5, 7) + "/" + +d.slice(8, 10);
+const wdOf = d => WD[(new Date(d + "T00:00:00").getDay() + 6) % 7];
+const wdClass = d => { const w = new Date(d + "T00:00:00").getDay();
+                       return w === 6 ? "wkd-sat" : w === 0 ? "wkd-sun" : ""; };
+const dayAmount = (d, acc) => acc ? (dayAmounts(d)[acc] || 0) : dayTotal(d);
+
+// 前月との比較。月の途中は「前月の同じ日まで」と比べる（月初に大きなマイナスにならないように）
+function compare(ym, acc){
+  const pv = prevYm(ym);
+  let base, now, text;
+  if (isComplete(ym)) {
+    base = acc ? (monthAmounts(pv)[acc] || 0) : monthTotal(pv);
+    now  = acc ? (monthAmounts(ym)[acc] || 0) : monthTotal(ym);
+    text = "前月比";
+  } else {
+    const days = daysOfMonth(ym);
+    if (!days.length || !DATA.daily[pv + "-01"]) return {v: null, text: "前月同期比"};
+    const n = +days[days.length - 1].slice(8);
+    now = days.reduce((s, d) => s + dayAmount(d, acc), 0);
+    base = daysOfMonth(pv).filter(d => +d.slice(8) <= n).reduce((s, d) => s + dayAmount(d, acc), 0);
+    text = "前月同期比";
+  }
+  return {v: base ? (now - base) / base * 100 : null, text};
+}
+function cmpHtml(c, short){
+  if (!c || c.v === null) return '<span class="flat">' + (short ? "" : c.text + " ―") + '</span>';
+  const cls = c.v > 0 ? "up" : (c.v < 0 ? "down" : "flat");
+  const num = (c.v > 0 ? "+" : "") + c.v.toFixed(short ? 0 : 1) + "%";
+  return (short ? c.text + " " : c.text + " ") + '<span class="' + cls + '">' + num + '</span>';
+}
+// 月の途中なら、1日平均×その月の日数で月末の見込み
+const monthProjection = ym => isComplete(ym) ? null : dayAverage(ym) * daysInMonth(ym);
+
+// ── 画面 ──
+function renderKpi(ym){
+  const months = monthList(), latest = DATA.latest_date;
+  $("tTotal").textContent = "累計売上（全期間）";
+  $("kTotal").textContent = yen(grandTotal());
+  $("nTotal").textContent = months.length ? ymLabel(months[0]) + "〜" + ymLabel(months[months.length - 1]) +
+                            "（" + months.length + "ヶ月）" : "";
+
+  $("tMonth").textContent = ymLabel(ym) + " の売上" + (isComplete(ym) ? "" : "（途中）");
+  $("kMonth").textContent = yen(monthTotal(ym));
+  $("nMonth").innerHTML = cmpHtml(compare(ym));
+
+  if (latest) {
+    $("tDay").textContent = md(latest) + "（" + wdOf(latest) + "）の売上";
+    $("kDay").textContent = yen(dayTotal(latest));
+    const all = Object.keys(DATA.daily).sort(), i = all.indexOf(latest);
+    $("nDay").textContent = i > 0 ? "最新の取得日／前日 " + yen(dayTotal(all[i - 1])) : "最新の取得日";
+  } else {
+    $("tDay").textContent = "最新日の売上"; $("kDay").textContent = "―"; $("nDay").textContent = "";
+  }
+
+  $("tAvg").textContent = +ym.slice(5, 7) + "月の1日平均";
+  $("kAvg").textContent = yen(dayAverage(ym));
+  const proj = monthProjection(ym);
+  $("nAvg").textContent = proj === null ? daysOfMonth(ym).length + "日分から算出"
+                                        : "このペースだと月末 " + yen(proj);
+}
+
+function viewAccounts(ym){
+  const month = monthAmounts(ym), total = monthTotal(ym);
+  const top = Math.max(...DATA.accounts.map(a => month[a] || 0), 1);
+  const days = Math.max(daysOfMonth(ym).length, 1);
+  let html = '<div class="card"><h2>' + ymLabel(ym) + ' のアカウント別売上' +
+             (isComplete(ym) ? "" : "（" + md(daysOfMonth(ym).slice(-1)[0] || ym + "-01") + "まで）") + '</h2>';
+  DATA.accounts.forEach((a, i) => {
+    const v = month[a] || 0;
+    const share = total ? (v / total * 100).toFixed(1) : "0.0";
+    html += '<div class="row"><div class="name">' + label(a) +
+      '<small>1日平均 ' + yen(v / days) + '　全期間 ' + yen(accountTotal(a)) + '</small>' +
+      '<div class="barline"><i style="width:' + (v / top * 100) + '%;background:' + color(i) + '"></i></div>' +
+      '</div><div class="val">' + yen(v) + '<small>全体の ' + share + '%</small>' +
+      '<small class="cmp">' + cmpHtml(compare(ym, a), true) + '</small></div></div>';
+  });
+  html += '<div class="row total-row"><div class="name">合計</div>' +
+          '<div class="val">' + yen(total) + '<small class="cmp">' + cmpHtml(compare(ym)) +
+          '</small></div></div>';
+  html += '<div class="note">前月比：前月1ヶ月分との比較。月の途中は「前月同期比」＝前月の同じ日までとの比較です</div>';
+  return html + '</div>';
+}
+
+function sparkline(days){
+  if (!days.length) return "";
+  const totals = days.map(dayTotal);
+  const top = Math.max(...totals, 1);
+  const avg = totals.reduce((a, b) => a + b, 0) / totals.length;
+  const w = 100 / days.length;
+  let bars = "";
+  days.forEach((d, i) => {
+    const h = totals[i] / top * 92;
+    const cls = wdClass(d);
+    const fill = cls === "wkd-sat" ? "#4d96ff" : cls === "wkd-sun" ? "#ff8c42" : "#e94560";
+    bars += '<rect x="' + (i * w + w * 0.15) + '" y="' + (100 - h) + '" width="' + (w * 0.7) +
+            '" height="' + Math.max(h, 1) + '" fill="' + fill + '" rx="0.6"></rect>';
+  });
+  const ay = 100 - avg / top * 92;
+  bars += '<line x1="0" x2="100" y1="' + ay + '" y2="' + ay + '" stroke="#eaeaea" stroke-opacity=".55"' +
+          ' stroke-dasharray="2 1.5" vector-effect="non-scaling-stroke" stroke-width="1"></line>';
+  const best = days[totals.indexOf(Math.max(...totals))];
+  return '<div class="chart"><svg viewBox="0 0 100 100" preserveAspectRatio="none">' + bars + '</svg></div>' +
+    '<div class="legend"><span><i style="background:#e94560"></i>平日</span>' +
+    '<span><i style="background:#4d96ff"></i>土</span><span><i style="background:#ff8c42"></i>日</span>' +
+    '<span>┄ 平均 <b>' + yen(avg) + '</b></span><span>最高 <b>' + md(best) + ' ' + yen(dayTotal(best)) +
+    '</b></span></div>';
+}
+
+function viewDays(ym){
+  const days = daysOfMonth(ym);
+  if (!days.length) return '<div class="card"><div class="empty">この月のデータはまだありません</div></div>';
+  let html = '<div class="card"><h2>' + ymLabel(ym) + ' の日ごとの売上（新しい順・タップで内訳）</h2>' +
+             sparkline(days);
+  days.slice().reverse().forEach(d => {
+    const per = dayAmounts(d);
+    let inner = "";
+    DATA.accounts.forEach(a => {
+      inner += '<div><span>' + label(a) + '</span><b>' + yen(per[a] || 0) + '</b></div>';
+    });
+    html += '<details class="day"><summary><div class="row">' +
+      '<div class="name"><span class="chev">▶</span> <span class="' + wdClass(d) + '">' + md(d) +
+      '（' + wdOf(d) + '）</span></div><div class="val">' + yen(dayTotal(d)) + '</div></div></summary>' +
+      '<div class="breakdown">' + inner + '</div></details>';
+  });
+  const total = days.reduce((s, d) => s + dayTotal(d), 0);
+  const proj = monthProjection(ym);
+  html += '<div class="row total-row"><div class="name">合計（' + days.length + '日）</div>' +
+    '<div class="val">' + yen(total) + '<small>1日平均 ' + yen(total / days.length) + '</small>' +
+    (proj === null ? '' : '<small>このペースだと月末 ' + yen(proj) + '</small>') + '</div></div></div>';
+  return html;
+}
+
+function viewMonths(){
+  const months = monthList();
+  let html = '<div class="card"><h2>月ごとの売上と累計</h2>';
+  const top = Math.max(...months.map(monthTotal), 1);
+  let running = 0;
+  months.forEach(ym => {
+    running += monthTotal(ym);
+    const proj = monthProjection(ym);
+    const days = daysOfMonth(ym);
+    html += '<div class="row"><div class="name">' + ymLabel(ym) +
+      (proj === null ? '' : '<span class="badge b-fc">途中</span>') +
+      '<small>累計 ' + yen(running) +
+      (proj === null ? '' : '　' + md(days[days.length - 1]) + 'まで／月末見込み ' + yen(proj)) + '</small>' +
+      '<div class="barline"><i style="width:' + (monthTotal(ym) / top * 100) +
+      '%;background:#00d9a0"></i></div></div>' +
+      '<div class="val">' + yen(monthTotal(ym)) + '<small class="cmp">' + cmpHtml(compare(ym), true) +
+      '</small></div></div>';
+  });
+  html += '<div class="row total-row"><div class="name">全期間の累計</div>' +
+          '<div class="val">' + yen(grandTotal()) + '</div></div></div>';
+
+  html += '<div class="card"><h2>アカウント別の累計（全期間）</h2>';
+  const gt = grandTotal();
+  const tops = Math.max(...DATA.accounts.map(accountTotal), 1);
+  DATA.accounts.forEach((a, i) => {
+    const v = accountTotal(a);
+    html += '<div class="row"><div class="name">' + label(a) +
+      '<div class="barline"><i style="width:' + (v / tops * 100) + '%;background:' + color(i) +
+      '"></i></div></div><div class="val">' + yen(v) + '<small>全体の ' +
+      (gt ? (v / gt * 100).toFixed(1) : "0.0") + '%</small></div></div>';
+  });
+  return html + '</div>';
+}
+
+// ── 振込（予想 → 確定） ──
+const slashDate = d => d ? d.replace(/-/g, "/") : "―";
+const L_PAID = "入金額", L_SHARE = "2割引いた残金（自分達の取り分）", L_DIFF = "アカウント主に支払う金額";
+const payInfo = () => DATA.payments || {months: {}, exclude: []};
+const kindBadge = pm => pm.kind === "confirmed" ? '<span class="badge b-conf">確定</span>'
+                      : pm.kind === "forecast" ? '<span class="badge b-fc">' +
+                        (pm.complete ? "予想" : "途中予想") + '</span>' : "";
+
+// 振込タブを開いたときの月：確定済みか、月末までそろった予想のうち一番新しい月
+function payDefaultYm(){
+  const M = payInfo().months;
+  const ok = Object.keys(M).filter(ym => M[ym].kind === "confirmed" ||
+                                         (M[ym].kind === "forecast" && M[ym].complete)).sort();
+  return ok.length ? ok[ok.length - 1] : null;
+}
+
+function statusHtml(ym, pm, rate){
+  const pct = rate ? (rate * 100).toFixed(1) : null;
+  if (pm.kind === "confirmed") {
+    let desc = "振込日 " + slashDate(pm.pay_date) + " に入金済みの実額です";
+    if (pm.forecast_total !== null && pm.forecast_total !== undefined) {
+      const d = pm.total - pm.forecast_total;
+      desc += "<br>確定前の予想 " + yen(pm.forecast_total) + " との差 " + (d >= 0 ? "+" : "−") +
+              Math.abs(d).toLocaleString("ja-JP") + "円";
+    }
+    return '<div class="status conf"><div class="head">✅ ' + ymLabel(ym) + '分　確定</div>' +
+           '<div class="desc">' + desc + '</div></div>';
+  }
+  const head = pm.complete ? "🔮 " + ymLabel(ym) + "分　振込予想"
+                           : "🔮 " + ymLabel(ym) + "分　途中経過の予想（" + md(pm.as_of) + "までの売上）";
+  let desc = "振込予定日 " + slashDate(pm.due) + "。これまでの実績から、売上（卸金額）の " + pct +
+             "% が入金される計算です。振込日の16時ごろに実額を取得して「確定」になります";
+  if (!pm.complete) desc += "<br>月末までの売上がそろう翌月1日の昼ごろに予想が固まります";
+  return '<div class="status fc"><div class="head">' + head + '</div><div class="desc">' + desc + '</div></div>';
+}
+
+function viewPayments(ym){
+  const P = payInfo();
+  const pm = P.months[ym] || {rows: {}, kind: "none"};
+  const rows = pm.rows || {};
+  const ex = (P.exclude || []).join("・");
+  const exNote = ex ? "（" + ex + "除く）" : "";
+  const fc = pm.kind === "forecast";
+  const yen2 = n => fc ? '<span class="fcnum">' + yen(n) + '</span>' : yen(n);
+
+  if (pm.kind === "none" || !Object.keys(rows).length) {
+    return '<div class="card"><h2>' + ymLabel(ym) + '分の振込</h2><div class="empty">振込予定日 ' +
+      slashDate(pm.due) + '<br>まだ予想を出せるデータがありません</div></div>' + paymentHistory(P);
+  }
+
+  // 分配の流れ：入金額 → アカウント主に支払う／自分達の取り分 → 1人あたり／差し引き後の個人の取り分
+  const pd = P.person_deduct;
+  let html = '<div class="card">' + statusHtml(ym, pm, P.pay_rate) +
+    '<div class="frow top"><div class="k">' + L_PAID + ' 合計' + (fc ? "（予想）" : "") +
+      '<small>振込' + (fc ? "予定日 " + slashDate(pm.due) : "日 " + slashDate(pm.pay_date)) + '</small></div>' +
+      '<b>' + yen2(pm.total) + '</b></div>' +
+    '<div class="frow l1 owner"><div class="k"><span class="tw">├</span>' + L_DIFF +
+      '<small>' + L_PAID + 'の2割</small></div><b>' + yen2(pm.diff_total) + '</b></div>' +
+    '<div class="frow l1"><div class="k"><span class="tw">└</span>' + L_SHARE +
+      '<small>' + L_PAID + 'から2割を引いた残り' + exNote + '</small></div><b>' + yen2(pm.share_total) + '</b></div>' +
+    '<div class="frow l2 hl"><div class="k"><span class="tw">├</span>1人あたりの取り分' +
+      '<small>自分達の取り分の半分</small></div><b>' + yen2(pm.per_person) + '</b></div>' +
+    (!pd ? '' :
+      '<div class="frow l2 hl p2"><div class="k"><span class="tw">└</span>' + pd.name +
+      '<small>1人あたり − ' + pd.account + 'の自分達の取り分</small></div><b>' +
+      (pm.deducted_person === null || pm.deducted_person === undefined ? "未取得" : yen2(pm.deducted_person)) +
+      '</b></div>') +
+    (pm.carry_total ? '<div class="note">次月繰越 ' + yen(pm.carry_total) + '（' +
+      (fc ? "3,000円未満のため繰越になる見込み" : "今回は振り込まれず、翌月分に足されます") + '）</div>' : '') +
+    '</div>';
+
+  (pm.groups || []).forEach(g => {
+    html += '<div class="card"><h2>' + ymLabel(ym) + '分　' + g.name + kindBadge(pm) + '</h2>' +
+      '<div class="row"><div class="name">' + L_PAID + ' 合計</div><div class="val">' + yen2(g.total) + '</div></div>' +
+      '<div class="row"><div class="name">' + L_SHARE + ' 合計</div><div class="val">' + yen2(g.share_total) + '</div></div>' +
+      '<div class="row"><div class="name">' + L_DIFF + ' 合計</div><div class="val">' + yen2(g.diff_total) + '</div></div>' +
+      (g.missing && g.missing.length ? '<div class="note">未取得: ' + g.missing.join("・") + '（合計に含まれていません）</div>' : '') +
+      '</div>';
+  });
+
+  html += '<div class="card"><h2>' + ymLabel(ym) + '分　アカウント別' + kindBadge(pm) + '</h2>';
+  DATA.accounts.forEach(a => {
+    const r = rows[a];
+    let name = label(a), detail;
+    if (!r) {
+      detail = '<small class="flat">' + (fc ? "売上なし" : "未取得") + '</small>';
+    } else if (!r.amount && r.carry_over) {
+      detail = '<small class="down">次月繰越 ' + yen(r.carry_over) + '</small>';
+    } else if (r.share === null) {
+      detail = '<small class="flat">2割引き 対象外</small>';
+    } else {
+      detail = '<small>自分達の取り分 <b>' + yen2(r.share) + '</b><br>アカウント主に支払う <b>' +
+               yen2(r.diff) + '</b></small>';
+    }
+    html += '<div class="row"><div class="name">' + name + '</div>' +
+            '<div class="val">' + (r ? yen2(r.amount) : "―") + detail + '</div></div>';
+  });
+  html += '<div class="row total-row"><div class="name">合計</div><div class="val">' + yen2(pm.total) +
+          '<small>自分達の取り分 <b>' + yen2(pm.share_total) + '</b><br>アカウント主に支払う <b>' +
+          yen2(pm.diff_total) + '</b></small></div></div>';
+  html += '<div class="note">右の大きい数字が' + L_PAID + (fc ? "（予想）" : "") + 'です。</div>';
+  return html + '</div>' + paymentHistory(P);
+}
+
+function paymentHistory(P){
+  const list = Object.keys(P.months).filter(ym => P.months[ym].kind !== "none" &&
+                                                  Object.keys(P.months[ym].rows || {}).length).sort();
+  if (!list.length) return "";
+  let html = '<div class="card"><h2>月ごとの入金（予想→確定）</h2>';
+  let t = 0, st = 0, dt = 0;
+  list.slice().reverse().forEach(ym => {
+    const pm = P.months[ym], conf = pm.kind === "confirmed";
+    if (conf) { t += pm.total; st += pm.share_total; dt += pm.diff_total; }
+    html += '<div class="row"><div class="name">' + ymLabel(ym) + '分' + kindBadge(pm) + '<small>' +
+      (conf ? "振込日 " + slashDate(pm.pay_date) : "振込予定日 " + slashDate(pm.due)) + '</small></div>' +
+      '<div class="val">' + (conf ? yen(pm.total) : '<span class="fcnum">' + yen(pm.total) + '</span>') +
+      '<small>自分達の取り分 <b>' + yen(pm.share_total) + '</b><br>アカウント主に支払う <b>' +
+      yen(pm.diff_total) + '</b></small></div></div>';
+  });
+  html += '<div class="row total-row"><div class="name">確定分の累計</div><div class="val">' + yen(t) +
+          '<small>自分達の取り分 <b>' + yen(st) + '</b><br>アカウント主に支払う <b>' + yen(dt) +
+          '</b></small></div></div>';
+  return html + '</div>';
+}
+
+function render(){
+  const ym = $("ym").value;
+  renderKpi(ym);
+  $("salesKpis").hidden = TAB === "pay";
+  $("view").innerHTML = TAB === "acc" ? viewAccounts(ym)
+                      : TAB === "day" ? viewDays(ym)
+                      : TAB === "pay" ? viewPayments(ym)
+                      : viewMonths();
+}
+
+// 古いページがキャッシュから開かれたら、最新版を読み込み直す。
+// data.json は毎回取り直しているので、そこに書かれた版と比べる。
+// URL にクエリを付けるとキャッシュを通らずに新しいページが取れる。
+function reloadIfStale(data){
+  const rev = data && data.page_rev;
+  if (!rev || rev === PAGE_REV || PAGE_REV.startsWith("__")) { $("stale").hidden = true; return false; }
+  // 公開直後は GitHub Pages の反映（1〜2分）が終わるまで古い版が返ることがあるので、
+  // 1回で諦めず3回まで読み直す。毎回別のURLにしてキャッシュを通さない
+  const key = "sales-board-rev:" + rev;
+  const tries = (() => { try { return +(sessionStorage.getItem(key) || 0); } catch (_) { return 9; } })();
+  if (tries < 3) {
+    try { sessionStorage.setItem(key, String(tries + 1)); } catch (_) {}
+    location.replace(location.pathname + "?v=" + rev + "&t=" + Date.now());
+    return true;
+  }
+  $("stale").hidden = false;  // それでも古いままなら、手動で読み直すボタンを出す
+  return false;
+}
+
+function boot(data){
+  if (reloadIfStale(data)) return;
+  DATA = data;
+  const months = monthList();
+  const sel = $("ym");
+  sel.innerHTML = months.slice().reverse()
+    .map(m => '<option value="' + m + '">' + ymLabel(m) + '</option>').join("");
+  if (!sel.value && months.length) sel.value = months[months.length - 1];
+  $("updated").textContent = "最終更新 " + (DATA.generated_at || "―") +
+                             "　/　最新データ " + (DATA.latest_date || "―");
+  $("foot").textContent = "対象アカウント " + DATA.accounts.length + "件";
+  $("lock").hidden = true;
+  $("app").hidden = false;
+  render();
+}
+
+// ── イベント ──
+$("lockForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  const pass = $("pass").value.trim();
+  if (!pass) return;
+  $("lockErr").textContent = "読み込み中…";
+  try {
+    const data = await loadData(pass);
+    if ($("remember").checked) {
+      try { localStorage.setItem(STORE_KEY, pass); } catch (_) {}
+    }
+    $("lockErr").textContent = "";
+    boot(data);
+  } catch (err) {
+    $("lockErr").textContent = (err && err.name === "OperationError")
+      ? "合言葉が違います" : ("開けませんでした: " + (err.message || err));
+  }
+});
+
+$("ym").addEventListener("change", render);
+$("stale").addEventListener("click", () => {
+  location.replace(location.pathname + "?v=" + Date.now() + "&t=" + Date.now());
+});
+document.querySelectorAll(".tabs button").forEach(b => {
+  b.addEventListener("click", () => {
+    document.querySelectorAll(".tabs button")
+      .forEach(x => x.setAttribute("aria-selected", String(x === b)));
+    TAB = b.dataset.tab;
+    // 振込タブは、まだ途中の月ではなく「確定」か「月末までそろった予想」の最新月を開く
+    if (TAB === "pay" && !isComplete($("ym").value)) {
+      const def = payDefaultYm();
+      if (def && monthList().includes(def)) $("ym").value = def;
+    }
+    render();
+  });
+});
+$("reload").addEventListener("click", async () => {
+  const pass = (() => { try { return localStorage.getItem(STORE_KEY); } catch (_) { return null; } })();
+  if (!pass) return location.reload();
+  $("reload").textContent = "…";
+  try {
+    const keep = $("ym").value;
+    DATA = await loadData(pass);
+    if (monthList().includes(keep)) {
+      boot(DATA); $("ym").value = keep; render();
+    } else { boot(DATA); }
+  } catch (_) {
+    location.reload();
+  }
+  $("reload").textContent = "🔄 更新";
+});
+
+// 保存済みの合言葉があれば自動で開く。アプリに戻ってきたときは黙って読み直す
+(async () => {
+  let saved = null;
+  try { saved = localStorage.getItem(STORE_KEY); } catch (_) {}
+  if (!saved) return;
+  try { boot(await loadData(saved)); }
+  catch (_) { try { localStorage.removeItem(STORE_KEY); } catch (_) {} }
+})();
+
+document.addEventListener("visibilitychange", async () => {
+  if (document.visibilityState !== "visible" || !DATA) return;
+  let saved = null;
+  try { saved = localStorage.getItem(STORE_KEY); } catch (_) {}
+  if (!saved) return;
+  try {
+    const fresh = await loadData(saved);
+    if (fresh.generated_at !== DATA.generated_at) {
+      const keep = $("ym").value;
+      DATA = fresh; boot(DATA);
+      if (monthList().includes(keep)) { $("ym").value = keep; render(); }
+    }
+  } catch (_) {}
+});
+</script>
+</body>
+</html>
