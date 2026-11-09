@@ -490,6 +490,11 @@ class FanzaAutoInputApp:
         self.notebook.add(self.mgmt_frame, text="出品管理表")
         self.create_management_tab()
 
+        # 生成管理表タブ
+        self.gen_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.gen_frame, text="生成管理表")
+        self.create_generation_tab()
+
         # 設定タブ
         self.settings_frame = ttk.Frame(self.notebook)
         self.notebook.add(self.settings_frame, text="設定")
@@ -2938,6 +2943,140 @@ class FanzaAutoInputApp:
                      values=STATUS_LIST, width=10, state="readonly").pack(side=tk.LEFT, padx=2)
         ttk.Button(edit, text="ステータス適用",
                    command=self.apply_status).pack(side=tk.LEFT, padx=2)
+
+    # ===== 生成管理表タブ =====
+    # 月ごとに「そのアカウントの作品生成を済ませたか」をチェックするだけの簡易表。
+    # アカウントは出品管理表と同じ（運用停止アカウントは赤表示・集計対象外）。
+    GEN_FILTERS = ["全アカウント", "未生成のみ", "生成済みのみ"]
+
+    def create_generation_tab(self):
+        c = self.COLORS
+        frame = self.gen_frame
+
+        bar = ttk.Frame(frame)
+        bar.pack(fill=tk.X, padx=5, pady=5)
+
+        ttk.Label(bar, text="月:").pack(side=tk.LEFT, padx=(2, 2))
+        cur = current_ym()
+        self.gen_month_var = tk.StringVar(value=cur)
+        gen_month = ttk.Combobox(
+            bar, textvariable=self.gen_month_var,
+            values=[prev_ym(prev_ym(cur)), prev_ym(cur), cur, next_ym(cur)],
+            width=10, state="readonly")
+        gen_month.pack(side=tk.LEFT, padx=2)
+        gen_month.bind("<<ComboboxSelected>>", lambda e: self.refresh_generation_view())
+
+        ttk.Label(bar, text="表示:").pack(side=tk.LEFT, padx=(10, 2))
+        self.gen_filter_var = tk.StringVar(value=self.GEN_FILTERS[0])
+        gen_filter = ttk.Combobox(bar, textvariable=self.gen_filter_var,
+                                  values=self.GEN_FILTERS, width=12, state="readonly")
+        gen_filter.pack(side=tk.LEFT, padx=2)
+        gen_filter.bind("<<ComboboxSelected>>", lambda e: self.refresh_generation_view())
+
+        ttk.Button(bar, text="更新", command=self.refresh_generation_view).pack(side=tk.LEFT, padx=(10, 2))
+        ttk.Button(bar, text="選択行をチェック",
+                   command=lambda: self.set_generation_selected(True)).pack(side=tk.LEFT, padx=2)
+        ttk.Button(bar, text="選択行のチェックを外す",
+                   command=lambda: self.set_generation_selected(False)).pack(side=tk.LEFT, padx=2)
+
+        self.gen_summary_var = tk.StringVar(value="")
+        ttk.Label(frame, textvariable=self.gen_summary_var,
+                  foreground=c["fg_secondary"]).pack(fill=tk.X, padx=8, pady=(0, 4))
+        ttk.Label(frame, text="「生成」列をクリックでチェックON/OFF（Ctrl/Shiftで複数選択→上のボタンでまとめて変更）",
+                  foreground=c["fg_secondary"]).pack(fill=tk.X, padx=8, pady=(0, 4))
+
+        tree_frame = ttk.Frame(frame)
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=2)
+        cols = ("account", "circle", "done", "done_at")
+        self.gen_tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
+                                     selectmode="extended", height=20)
+        for key, label, w in [("account", "アカウント", 90), ("circle", "サークル名", 200),
+                              ("done", "生成", 70), ("done_at", "チェック日時", 160)]:
+            self.gen_tree.heading(key, text=label)
+            self.gen_tree.column(key, width=w, anchor=(tk.W if key == "circle" else tk.CENTER))
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.gen_tree.yview)
+        self.gen_tree.configure(yscrollcommand=vsb.set)
+        self.gen_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.gen_tree.tag_configure("gray", background="#3f3f46", foreground="#d4d4d8")
+        self.gen_tree.tag_configure("green", background="#14532d", foreground="#c6efce")
+        self.gen_tree.tag_configure("red", background="#7f1d1d", foreground="#fecaca")
+        self.gen_tree.bind("<Button-1>", self._on_generation_click)
+
+        self.refresh_generation_view()
+
+    def refresh_generation_view(self):
+        if not hasattr(self, "gen_tree"):
+            return
+        from management import db as _db
+        ym = self.gen_month_var.get()
+        filt = self.gen_filter_var.get()
+        try:
+            gen = _db.get_generation(ym, self.listing_manager.db_path)
+            accounts = self.listing_manager.accounts()
+            names = self.listing_manager.account_names()
+        except Exception as e:
+            self.gen_summary_var.set(f"読み込みエラー: {e}")
+            return
+
+        for iid in self.gen_tree.get_children():
+            self.gen_tree.delete(iid)
+        done_n = todo_n = 0
+        for account in accounts:
+            g = gen.get(account, {})
+            done = g.get("done", False)
+            if account in STOPPED_ACCOUNTS:
+                if filt == self.GEN_FILTERS[0]:
+                    self.gen_tree.insert("", tk.END, iid=account,
+                                         values=(account, names.get(account, ""), "運用停止", ""),
+                                         tags=("red",))
+                continue
+            if done:
+                done_n += 1
+            else:
+                todo_n += 1
+            if (filt == "未生成のみ" and done) or (filt == "生成済みのみ" and not done):
+                continue
+            self.gen_tree.insert("", tk.END, iid=account,
+                                 values=(account, names.get(account, ""),
+                                         "☑" if done else "☐", g.get("done_at", "")),
+                                 tags=("green" if done else "gray",))
+        self.gen_summary_var.set(
+            f"{ym} 生成管理表 ｜ 生成済み {done_n} / 未生成 {todo_n}（運用停止を除く {done_n + todo_n}アカウント）")
+
+    def _on_generation_click(self, event):
+        # 「生成」列（#3）のクリックだけトグル。他の列は通常の行選択。
+        if self.gen_tree.identify_region(event.x, event.y) != "cell":
+            return
+        if self.gen_tree.identify_column(event.x) != "#3":
+            return
+        account = self.gen_tree.identify_row(event.y)
+        if not account or account in STOPPED_ACCOUNTS:
+            return
+        current = self.gen_tree.set(account, "done") == "☑"
+        self._write_generation([account], not current)
+        return "break"
+
+    def set_generation_selected(self, done):
+        sel = [a for a in self.gen_tree.selection() if a not in STOPPED_ACCOUNTS]
+        if not sel:
+            messagebox.showwarning("未選択", "対象アカウントの行を選択してください。")
+            return
+        self._write_generation(sel, done)
+
+    def _write_generation(self, accounts, done):
+        from management import db as _db
+        ym = self.gen_month_var.get()
+        try:
+            for account in accounts:
+                _db.set_generation(ym, account, done, self.listing_manager.db_path)
+        except Exception as e:
+            messagebox.showerror("保存エラー", f"生成チェックを保存できませんでした:\n{e}")
+            return
+        yview = self.gen_tree.yview()[0]
+        self.refresh_generation_view()
+        self.gen_tree.yview_moveto(yview)
 
     def _mgmt_ctx(self):
         """現在の (ym, table_type) を返す。"""

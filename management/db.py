@@ -186,6 +186,15 @@ def init_db(db_path=None):
                 PRIMARY KEY (sales_ym, account)
             );
 
+            -- 生成管理表: 月ごとにアカウントの作品生成を済ませたかのチェックのみ
+            CREATE TABLE IF NOT EXISTS generation (
+                ym         TEXT    NOT NULL,   -- 'YYYY-MM'
+                account    TEXT    NOT NULL,
+                done       INTEGER NOT NULL DEFAULT 0,
+                done_at    TEXT,               -- チェックした日時
+                PRIMARY KEY (ym, account)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_slots_ym_type
                 ON slots (ym, table_type);
             CREATE INDEX IF NOT EXISTS idx_slots_title
@@ -257,6 +266,26 @@ def list_accounts(db_path=None):
     codes = [r["code"] for r in rows]
     codes.sort(key=account_sort_key)
     return codes
+
+
+# ── generation（生成管理表） ─────────────────────────────
+def get_generation(ym: str, db_path=None) -> dict:
+    """{account: {"done": bool, "done_at": str}} を返す（未登録アカウントは含まない）。"""
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT account, done, done_at FROM generation WHERE ym=?", (ym,)
+        ).fetchall()
+    return {r["account"]: {"done": bool(r["done"]), "done_at": r["done_at"] or ""}
+            for r in rows}
+
+
+def set_generation(ym: str, account: str, done: bool, db_path=None):
+    with connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO generation (ym, account, done, done_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(ym, account) DO UPDATE SET done=excluded.done, done_at=excluded.done_at",
+            (ym, account, 1 if done else 0, now_iso() if done else None),
+        )
 
 
 # ── slots ───────────────────────────────────────────────
