@@ -45,7 +45,7 @@ from management import excel_export
 
 # 運用停止アカウント（管理表で赤表示。作業対象の集計からも除外する）
 # アカウントコードで指定する（例: FANZA-031→"031", FANZA-087→"087"）
-STOPPED_ACCOUNTS = {"031", "087"}
+STOPPED_ACCOUNTS = {"031", "041", "054", "087"}
 
 ARTICLE_TYPES = [
     ("comic", "コミック・小説"),
