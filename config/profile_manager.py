@@ -103,6 +103,33 @@ class ProfileManager:
         self.profiles = [p for p in self.profiles if p.profile_id != profile_id]
         self.save()
 
+    def reconcile_ids(self, live_profiles: list[dict]) -> list[tuple[str, str, str]]:
+        """AdsPower実機のプロファイル一覧と突合し、名前一致で古いprofile_idを現行IDに更新する。
+
+        AdsPower側でプロファイルを作り直すと user_id が変わり、ローカル保存のIDが
+        「Profile does not exist」になる。フォルダ紐付けは保持したままIDだけ張り替える。
+        戻り値: 更新した (profile_name, old_id, new_id) のリスト。
+        """
+        live_ids = {p.get("user_id") for p in live_profiles}
+        # 名前 -> 現行user_id（同名が複数ある場合は最初のものを採用）
+        name_to_id: dict[str, str] = {}
+        for p in live_profiles:
+            name = p.get("name")
+            if name and name not in name_to_id:
+                name_to_id[name] = p.get("user_id")
+
+        changes: list[tuple[str, str, str]] = []
+        for local in self.profiles:
+            if local.profile_id in live_ids:
+                continue  # 現行IDなのでOK
+            new_id = name_to_id.get(local.profile_name)
+            if new_id and new_id != local.profile_id:
+                changes.append((local.profile_name, local.profile_id, new_id))
+                local.profile_id = new_id
+        if changes:
+            self.save()
+        return changes
+
     def get_profile(self, profile_id: str) -> Optional[ProfileConfig]:
         """プロファイルを取得"""
         for p in self.profiles:
@@ -116,6 +143,20 @@ class ProfileManager:
         if profile and folder_path not in profile.folders:
             profile.folders.append(folder_path)
             self.save()
+
+    def add_folders_to_profile(self, profile_id: str, folder_paths: list[str]) -> int:
+        """プロファイルに複数フォルダをまとめて追加（重複は除外）。追加件数を返す"""
+        profile = self.get_profile(profile_id)
+        if not profile:
+            return 0
+        added = 0
+        for folder_path in folder_paths:
+            if folder_path not in profile.folders:
+                profile.folders.append(folder_path)
+                added += 1
+        if added:
+            self.save()
+        return added
 
     def remove_folder_from_profile(self, profile_id: str, folder_path: str):
         """プロファイルからフォルダを削除"""

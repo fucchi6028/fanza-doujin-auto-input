@@ -13,7 +13,7 @@ from pathlib import Path
 # パス設定
 sys.path.insert(0, str(Path(__file__).parent))
 
-from browser.adspower import AdsPowerAPI, AdsPowerBrowser
+from browser.adspower import AdsPowerAPI, AdsPowerBrowser, LocalBrowser, is_local_profile
 from config.profile_manager import ProfileManager, ProfileConfig
 from config.variable_manager import (
     VariableManager,
@@ -42,6 +42,11 @@ from management.db import (
 from management import excel_export
 
 # 定数定義
+
+# 運用停止アカウント（管理表で赤表示。作業対象の集計からも除外する）
+# アカウントコードで指定する（例: FANZA-031→"031", FANZA-087→"087"）
+STOPPED_ACCOUNTS = {"031", "087"}
+
 ARTICLE_TYPES = [
     ("comic", "コミック・小説"),
     ("cg", "CG (イラスト・動画)"),
@@ -86,6 +91,30 @@ def mask_second_char(text: str) -> str:
     if len(text) >= 2:
         return text[0] + "〇" + text[2:]
     return text
+
+
+def masked_contains(text: str, needle: str) -> bool:
+    """needle が text に含まれるかを、2文字目の伏字を考慮して判定する。
+
+    完成品の説明文ではキャラ名・タイトルの2文字目が伏字（例:「鹿〇まどか」）に
+    なっており、素の名前（例:「鹿目まどか」）では絶対にヒットしない。
+    そのため2文字目を伏字文字（〇=U+3007 / ○=U+25CB）または元の文字として
+    許容して照合する。
+    """
+    if not needle or not text:
+        return False
+    # 素のまま（伏字なし）で含まれていればOK
+    if needle in text:
+        return True
+    if len(needle) < 2:
+        return False
+    # 2文字目を伏字（〇/○）または元の文字として許容する正規表現で照合
+    pattern = (
+        re.escape(needle[0])
+        + "[〇○" + re.escape(needle[1]) + "]"
+        + re.escape(needle[2:])
+    )
+    return re.search(pattern, text) is not None
 
 
 def extract_number(text: str):
@@ -819,6 +848,7 @@ class FanzaAutoInputApp:
         btn_frame.grid(row=2, column=0, columnspan=4, pady=10)
         ttk.Button(btn_frame, text="保存", command=self.save_trailer_product, style="Success.TButton").pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="予約作品入力開始", command=self.start_trailer_auto_input, style="Accent.TButton").pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="説明文を修正（予告編集）", command=self.start_trailer_description_edit).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="再読み込み", command=self.reload_trailer_product).pack(side=tk.LEFT, padx=5)
 
         # === 基本設定セクション ===
@@ -1302,21 +1332,136 @@ class FanzaAutoInputApp:
                 self.status_var.set("ブラウザを起動中...")
                 from browser.form_filler import FanzaTrailerFormFiller
 
-                browser = AdsPowerBrowser(self.ads_api)
+                browser = self._make_browser(self.trailer_current_profile_id)
                 if not browser.start(self.trailer_current_profile_id):
                     self.status_var.set("ブラウザ起動失敗")
-                    messagebox.showerror("エラー", "ブラウザの起動に失敗しました")
+                    messagebox.showerror(
+                        "エラー",
+                        "ブラウザの起動に失敗しました。\n\n"
+                        f"詳細: {browser.last_error}\n\n"
+                        "AdsPowerが起動しているか、対象プロファイルのブラウザが\n"
+                        "開けるか確認してください。")
                     return
 
                 self.status_var.set("予約作品フォーム入力中...")
                 filler = FanzaTrailerFormFiller(browser.get_driver(), callback=lambda m: self.status_var.set(m))
-                filler.navigate_to_form()
-                filler.fill_form(data)
+                if not filler.navigate_to_form():
+                    self.status_var.set("フォームが開けませんでした")
+                    messagebox.showerror(
+                        "エラー",
+                        "予約作品フォームページが開けなかったため、自動入力を中止しました。\n\n"
+                        "・FANZA同人にログインしているか\n"
+                        "・前回の入力確認ダイアログがブラウザに残っていないか\n"
+                        "を確認してから再実行してください。")
+                    return
+                if not filler.fill_form(data):
+                    self.status_var.set("自動入力に失敗しました")
+                    messagebox.showerror(
+                        "エラー",
+                        "予約作品の自動入力に失敗しました。\n"
+                        "ブラウザのフォーム状態を確認してから再実行してください。")
+                    return
 
                 self.status_var.set("完了！ブラウザで確認してください")
-                # 予約出品管理表へ自動チェック
-                self._record_slot("reserved", acct, title)
+                # 予約出品管理表への自動チェックは無効化（手動運用に変更）
                 messagebox.showinfo("完了", "予約作品の自動入力が完了しました。\nブラウザで内容を確認してください。")
+            except Exception as e:
+                self.status_var.set(f"エラー: {e}")
+                messagebox.showerror("エラー", str(e))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def start_trailer_description_edit(self):
+        """予告編集ページを作品管理ページから自動で開き、説明文だけを書き換える"""
+        if not getattr(self, "trailer_current_profile_id", None):
+            messagebox.showwarning("警告", "プロファイルを選択してください")
+            return
+
+        # 説明文欄の内容を新しい説明文として使う
+        comment = self.trailer_comment_text.get("1.0", tk.END).strip()
+        if not comment:
+            messagebox.showwarning("警告", "説明文が空です。書き換える説明文を入力してください。")
+            return
+
+        # 作品（シリーズ・商品フォルダ）が選択されていれば伏字タイトルで自動オープンできる
+        masked_title = ""
+        masked_product = ""
+        series = getattr(self, "trailer_current_series_folder", None)
+        product = getattr(self, "trailer_current_product_folder", None)
+        if series and product:
+            masked_product = mask_second_char(product)
+            masked_title = f"{series} {masked_product}"
+        else:
+            # 作品未選択: すでに開いている予告編集ページに入力するフォールバック
+            if not messagebox.askyesno(
+                "作品が未選択です",
+                "シリーズ・商品フォルダが選択されていません。\n"
+                "作品を選択すると、作品管理ページから予告編集ページを自動で開きます。\n\n"
+                "このまま「すでに開いている予告編集ページ」に説明文を入力しますか？",
+            ):
+                return
+
+        # 上書き確認
+        if not messagebox.askyesno(
+            "説明文の書き換え確認",
+            (f"作品「{masked_title}」の予告編集ページを開き、\n" if masked_title else "")
+            + "説明文を現在の内容で書き換えます。\n"
+            "（書き換え後、内容を確認してブラウザ上で手動保存してください）\n\nよろしいですか？",
+        ):
+            return
+
+        data = {
+            "comment": comment,
+            "masked_title": masked_title,
+            "masked_product": masked_product,
+        }
+
+        def run():
+            try:
+                self.status_var.set("ブラウザに接続中...")
+                from browser.form_filler import FanzaTrailerEditFiller
+
+                browser = self._make_browser(self.trailer_current_profile_id)
+                if not browser.start(self.trailer_current_profile_id):
+                    self.status_var.set("ブラウザ接続失敗")
+                    messagebox.showerror(
+                        "エラー",
+                        "ブラウザの起動に失敗しました。\n\n"
+                        f"詳細: {browser.last_error}\n\n"
+                        "AdsPowerが起動しているか、対象プロファイルのブラウザが\n"
+                        "開けるか確認してください。")
+                    return
+
+                self.status_var.set("予告編集ページで説明文を書き換え中...")
+                filler = FanzaTrailerEditFiller(
+                    browser.get_driver(), callback=lambda m: self.status_var.set(m)
+                )
+                result = filler.rewrite_description(data)
+
+                if result == "done":
+                    self.status_var.set("説明文の書き換え完了（手動で保存してください）")
+                    messagebox.showinfo(
+                        "完了",
+                        "予告編集ページで説明文を書き換えました。\n"
+                        "内容を確認して、ブラウザ上で手動保存してください。",
+                    )
+                elif result == "published":
+                    self.status_var.set("予告編集できません（出品済み等）")
+                    messagebox.showinfo(
+                        "予告編集不可",
+                        "選択した作品には予告編集ボタンがありません。\n"
+                        "（すでに出品済みなどの理由で予告を編集できない可能性があります）",
+                    )
+                elif result == "empty":
+                    self.status_var.set("説明文が空のため中止しました")
+                else:  # notfound
+                    self.status_var.set("予告編集ページが見つかりませんでした")
+                    messagebox.showwarning(
+                        "見つかりません",
+                        "予告編集ページを開けませんでした。\n"
+                        "作品管理ページに対象作品が表示されているか、\n"
+                        "表示カテゴリ（男性向け/TL/BL）やログイン状態をご確認ください。",
+                    )
             except Exception as e:
                 self.status_var.set(f"エラー: {e}")
                 messagebox.showerror("エラー", str(e))
@@ -1364,7 +1509,8 @@ class FanzaAutoInputApp:
                 "作品管理ページから伏字タイトルで該当作品の配信申請ページを自動で開き、\n"
                 "枚数（伏字ZIPから自動再取得）・キャンペーン自動参加・割引設定・配信開始日（最短で公開）を\n"
                 "入力します（申請の送信は手動で行ってください）。\n"
-                "※作品を選ばない場合は、すでに開いている配信申請ページに入力します。"
+                "さらに説明文をローカルの正しい説明文と照合し、違っていれば差分を確認のうえ書き換えます。\n"
+                "※作品を選ばない場合は、すでに開いている配信申請ページに入力します（説明文照合はスキップ）。"
             ),
             justify=tk.LEFT,
         ).pack(anchor=tk.W, padx=5, pady=2)
@@ -1523,7 +1669,9 @@ class FanzaAutoInputApp:
             self.formal_file_number_var.set('')
             return 0
 
-        masked_title = f"{self.formal_current_series_folder} {mask_second_char(self.formal_current_product_folder)}"
+        # 本編ZIPは「商品名の2文字目を伏字にした名前」で納品される
+        # （例: 商品「コードギアス Vol.2」→「コ〇ドギアス Vol.2.zip」）
+        masked_title = mask_second_char(self.formal_current_product_folder)
         total = count_images_in_masked_zip(product_path, masked_title)
         self.formal_file_number_var.set(str(total) if total > 0 else "")
         if total > 0:
@@ -1583,7 +1731,7 @@ class FanzaAutoInputApp:
                 self.status_var.set("ブラウザに接続中...")
                 from browser.form_filler import FanzaFormalRegistrationFiller
 
-                browser = AdsPowerBrowser(self.ads_api)
+                browser = self._make_browser(self.formal_current_profile_id)
                 if not browser.start(self.formal_current_profile_id):
                     self.status_var.set("ブラウザ接続失敗")
                     messagebox.showerror(
@@ -1596,10 +1744,19 @@ class FanzaAutoInputApp:
                     return
 
                 self.status_var.set("配信申請フォーム入力中...")
+                # 説明文照合の診断ログを初期化
+                try:
+                    with open(Path(__file__).parent / "debug_desc_check.txt", "w", encoding="utf-8") as f:
+                        f.write("=== 配信申請 説明文照合 ログ ===\n")
+                except Exception:
+                    pass
                 filler = FanzaFormalRegistrationFiller(
                     browser.get_driver(), callback=lambda m: self.status_var.set(m)
                 )
-                result = filler.fill_campaign_discount(data)
+                # 説明文・タイトルの早期チェックは、ページを開いた直後（入力前）に実行する
+                result = filler.fill_campaign_discount(
+                    data, on_page_ready=self._check_formal_description_early
+                )
 
                 if result == "published":
                     self.status_var.set("すでに出品済みです")
@@ -1617,14 +1774,10 @@ class FanzaAutoInputApp:
                         "（debug_catalog.html に作品管理ページを保存しました）",
                     )
                 else:
+                    # 説明文・タイトルの早期チェックは fill_campaign_discount 内で実施済み
+                    self._desc_log(f"fill_campaign_discount result={result!r}")
                     self.status_var.set("完了！ブラウザで確認して手動で申請してください")
-                    # 予告出品 → 出品管理表（当月0枠なら当月/出品済みなら翌月）
-                    acct = self._account_code_for(
-                        getattr(self, "formal_current_profile_id", None))
-                    title = self._join_title(
-                        getattr(self, "formal_current_series_folder", None),
-                        getattr(self, "formal_current_product_folder", None))
-                    self._record_slot("trailer", acct, title)
+                    # 出品管理表への自動チェックは無効化（手動運用に変更）
                     messagebox.showinfo(
                         "完了",
                         "配信申請のキャンペーン・割引入力が完了しました。\n"
@@ -1635,6 +1788,169 @@ class FanzaAutoInputApp:
                 messagebox.showerror("エラー", str(e))
 
         threading.Thread(target=run, daemon=True).start()
+
+    def _desc_log(self, msg: str):
+        """説明文照合の診断ログを debug_desc_check.txt に追記する"""
+        try:
+            path = Path(__file__).parent / "debug_desc_check.txt"
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(str(msg) + "\n")
+        except Exception:
+            pass
+
+    def _ask_yes_no_sync(self, title, msg):
+        """ワーカースレッドから、Tkメインスレッド上で「はい/いいえ」確認ダイアログを
+        表示し、ユーザーが答えるまで同期的に待って結果(True/False)を返す。
+
+        Tkは別スレッドから直接ダイアログを出せないため、root.after でメインスレッドに
+        表示を依頼し、Event でワーカー側をブロックして結果を受け取る。
+        """
+        result = {"value": False}
+        done = threading.Event()
+
+        def _show():
+            try:
+                result["value"] = messagebox.askyesno(title, msg)
+            finally:
+                done.set()
+
+        self.root.after(0, _show)
+        done.wait()
+        return result["value"]
+
+    def _check_formal_description_early(self, filler):
+        """配信申請ページを開いた直後（フォーム入力前）に、説明文・タイトルが
+        選択作品と食い違っていないかを早期チェックする。
+
+        - タイトル違い／キャラ違い（別作品の説明文の疑い）を検出した時だけ警告する。
+        - 問題が無ければポップアップは出さない（ステータスバー表示のみ）。
+        - 説明文のみ相違（タイトルは一致）の場合は、商品フォルダのテンプレートから
+          正しい説明文を生成し、確認ダイアログで「はい」を選んだときだけ自動で書き換える。
+        - タイトル不一致（別作品ページの疑い）の場合は書き換えず警告のみ。
+        """
+        self._desc_log("=== 説明文 早期チェック 開始（入力前） ===")
+        self.status_var.set("説明文・タイトルを確認中...")
+
+        product_path = self._get_formal_product_path()
+        self._desc_log(f"product_path={product_path}")
+        if product_path is None:
+            # 作品未選択（開いているページに直接入力するフォールバック）→ 照合不可
+            self._desc_log("→ 作品未選択のため早期チェックをスキップ")
+            return
+
+        series = self.formal_current_series_folder
+        product = self.formal_current_product_folder
+        expected_title = f"{series} {mask_second_char(product)}"
+
+        # 現在サイト上の値を取得
+        current_title = filler.read_current_title()
+        current_comment = filler.read_current_comment() or ""
+        self._desc_log(
+            f"expected_title={expected_title!r} / current_title={current_title!r} / "
+            f"current_comment={len(current_comment)}文字"
+        )
+
+        problems = []
+        title_mismatch = False
+
+        # 1) タイトル違い（別作品の配信申請ページを開いていないか）
+        if current_title and filler._normalize_title(current_title) != filler._normalize_title(expected_title):
+            self._desc_log("→ タイトル不一致")
+            title_mismatch = True
+            problems.append(
+                "■ タイトルが違います（別作品のページの可能性）\n"
+                f"　ページ: {current_title}\n"
+                f"　選択作品: {expected_title}"
+            )
+
+        # 2) 説明文にキャラ名が含まれているか（別作品の説明文の疑い）
+        #    ※パロディ元タイトル（例:「この素晴らしい世界に祝福を！」）は
+        #      「パロディ詳細1」欄に入れる項目であり、説明文本文には通常記載されない。
+        #      以前はこれを説明文に要求して正しい作品でも誤警告していたため廃止。
+        #      別作品検知はキャラ名照合とタイトル不一致（上記1）で行う。
+        missing = []
+        try:
+            chars = get_character_folders(product_path, min_images=50)
+        except Exception:
+            chars = []
+        for ch in chars:
+            if ch and not masked_contains(current_comment, ch):
+                missing.append(f"キャラ名「{ch}」")
+        if missing:
+            self._desc_log(f"→ 説明文に不足: {missing}")
+            problems.append(
+                "■ 説明文に以下が含まれていません（別作品の説明文の可能性）\n"
+                + "\n".join("　・" + m for m in missing)
+            )
+
+        if not problems:
+            self._desc_log("→ 問題なし（警告なし）")
+            self.status_var.set("説明文・タイトルOK（内容を確認して手動で申請してください）")
+            return
+
+        self._desc_log("→ 問題あり")
+        self.status_var.set("⚠ 説明文/タイトルに不一致の疑い（警告を確認してください）")
+        detail = "\n\n".join(problems)
+
+        # タイトル不一致のときは別作品ページを開いている疑いが高い。
+        # 説明文だけ書き換えると誤った作品に正しい説明文を入れてしまうため、
+        # 書き換えは行わず警告のみにする。
+        if title_mismatch:
+            self._desc_log("→ タイトル不一致のため書き換えは行わず警告のみ")
+            msg = (
+                "配信申請ページの内容が、選択作品と食い違っている可能性があります。\n"
+                "別作品を選んでいないかご確認ください。\n"
+                "（タイトル不一致のため、説明文の自動書き換えは行いません。手動で修正してください）\n\n"
+                + detail
+            )
+            self.root.after(0, lambda: messagebox.showwarning("説明文・タイトルの確認", msg))
+            return
+
+        # タイトルは一致。説明文のみ相違 → 商品フォルダのテンプレートから
+        # 正しい説明文を生成し、確認のうえ自動で書き換える。
+        correct_comment = ""
+        try:
+            template = read_description_file(product_path)
+            if template:
+                correct_comment = process_description_template(
+                    template, series, product_path, self.variable_manager
+                )
+        except Exception as e:
+            self._desc_log(f"正しい説明文の生成に失敗: {e}")
+
+        if not correct_comment.strip():
+            # 書き換え候補が作れない → 従来通り警告のみ
+            self._desc_log("→ 正しい説明文を生成できず、警告のみ")
+            msg = (
+                "配信申請ページの説明文が、選択作品と食い違っている可能性があります。\n"
+                "説明文が正しいかご確認ください。\n"
+                "（正しい説明文を生成できなかったため、自動書き換えは行いません。手動で修正してください）\n\n"
+                + detail
+            )
+            self.root.after(0, lambda: messagebox.showwarning("説明文・タイトルの確認", msg))
+            return
+
+        ask_msg = (
+            "配信申請ページの説明文が、選択作品と食い違っている可能性があります。\n\n"
+            + detail
+            + "\n\n商品フォルダのテンプレートから生成した正しい説明文に書き換えますか？\n"
+            "（「いいえ」を押すと書き換えず、手動で確認できます）"
+        )
+        if self._ask_yes_no_sync("説明文の書き換え確認", ask_msg):
+            self._desc_log("→ ユーザーが書き換えを選択。rewrite_comment 実行")
+            if filler.rewrite_comment(correct_comment):
+                self._desc_log("→ 書き換え成功")
+                self.status_var.set("説明文を書き換えました（内容を確認して手動で申請してください）")
+            else:
+                self._desc_log("→ 書き換え失敗（入力欄が見つからない）")
+                self.status_var.set("説明文の書き換えに失敗しました（要確認）")
+                self.root.after(0, lambda: messagebox.showwarning(
+                    "書き換え失敗",
+                    "説明文の入力欄が見つかりませんでした。\n手動で修正してください。",
+                ))
+        else:
+            self._desc_log("→ ユーザーが書き換えをキャンセル")
+            self.status_var.set("説明文の書き換えをキャンセルしました（手動で確認してください）")
 
     def create_settings_tab(self):
         c = self.COLORS
@@ -1811,6 +2127,42 @@ class FanzaAutoInputApp:
         if connected:
             self.conn_status.config(text="接続OK", foreground=self.COLORS["success"])
             self.load_groups()
+            # AdsPower側で作り直されてIDが変わったプロファイルを名前一致で自動修復
+            self._reconcile_profile_ids()
+
+    def _make_browser(self, profile_id):
+        """プロファイルに応じてブラウザ管理オブジェクトを生成する。
+
+        AdsPower未登録プロファイル（profile_idが "LOCAL-" 始まり。例: FANZA-AI-006）は
+        通常のChrome（LocalBrowser）で、それ以外はAdsPowerで動かす。
+        """
+        if is_local_profile(profile_id):
+            return LocalBrowser()
+        return AdsPowerBrowser(self.ads_api)
+
+    def _reconcile_profile_ids(self):
+        """AdsPower実機と突合し、古くなったprofile_idを現行IDへ自動更新する。
+
+        AdsPowerでプロファイルを作り直すと user_id が変わり、ローカル保存のIDが
+        「Profile does not exist」で起動失敗する。起動前にここで張り替えておく。
+        """
+        try:
+            live = self.ads_api.get_profiles()
+            if not live:
+                return
+            changes = self.profile_manager.reconcile_ids(live)
+            if changes:
+                names = "・".join(name for name, _, _ in changes)
+                print(f"[profile] ID自動修復: {changes}")
+                self.status_var.set(f"プロファイルID自動修復: {names}")
+                # コンボ/リストを最新IDで再構築
+                profile_names = [p.profile_name for p in self.profile_manager.profiles]
+                self.profile_combo['values'] = profile_names
+                self.trailer_profile_combo['values'] = profile_names
+                self.formal_profile_combo['values'] = profile_names
+                self.refresh_registered_list()
+        except Exception as e:
+            print(f"[profile] reconcile skipped: {e}")
 
     def refresh_registered_list(self):
         """登録済みプロファイルリストを更新"""
@@ -2138,20 +2490,38 @@ class FanzaAutoInputApp:
                 self.status_var.set("ブラウザを起動中...")
                 from browser.form_filler import FanzaFormFiller
 
-                browser = AdsPowerBrowser(self.ads_api)
+                browser = self._make_browser(self.current_profile_id)
                 if not browser.start(self.current_profile_id):
                     self.status_var.set("ブラウザ起動失敗")
-                    messagebox.showerror("エラー", "ブラウザの起動に失敗しました")
+                    messagebox.showerror(
+                        "エラー",
+                        "ブラウザの起動に失敗しました。\n\n"
+                        f"詳細: {browser.last_error}\n\n"
+                        "AdsPowerが起動しているか、対象プロファイルのブラウザが\n"
+                        "開けるか確認してください。")
                     return
 
                 self.status_var.set("フォーム入力中...")
                 filler = FanzaFormFiller(browser.get_driver(), callback=lambda m: self.status_var.set(m))
-                filler.navigate_to_form()
-                filler.fill_form(self.product.data)
+                if not filler.navigate_to_form():
+                    self.status_var.set("フォームが開けませんでした")
+                    messagebox.showerror(
+                        "エラー",
+                        "フォームページが開けなかったため、自動入力を中止しました。\n\n"
+                        "・FANZA同人にログインしているか\n"
+                        "・前回の入力確認ダイアログがブラウザに残っていないか\n"
+                        "を確認してから再実行してください。")
+                    return
+                if not filler.fill_form(self.product.data):
+                    self.status_var.set("自動入力に失敗しました")
+                    messagebox.showerror(
+                        "エラー",
+                        "自動入力に失敗しました。\n"
+                        "ブラウザのフォーム状態を確認してから再実行してください。")
+                    return
 
                 self.status_var.set("完了！ブラウザで確認してください")
-                # 出品管理表へ自動チェック
-                self._record_slot("listing", acct, title)
+                # 出品管理表への自動チェックは無効化（手動運用に変更）
                 messagebox.showinfo("完了", "自動入力が完了しました。\nブラウザで内容を確認してください。")
             except Exception as e:
                 self.status_var.set(f"エラー: {e}")
@@ -2171,7 +2541,7 @@ class FanzaAutoInputApp:
                 from browser.form_filler import extract_keywords_from_page
 
                 # 起動済みブラウザに接続（未起動の場合は起動して接続）
-                browser = AdsPowerBrowser(self.ads_api)
+                browser = self._make_browser(profile_id)
                 if not browser.start(profile_id):
                     self.status_var.set("ブラウザ接続失敗")
                     messagebox.showerror(
@@ -2419,14 +2789,7 @@ class FanzaAutoInputApp:
         where = "、".join(
             f"{h['account']}({TABLE_LABELS[h['table_type']]}/{h['ym']})" for h in dups
         )
-        # 重複疑いはDiscordにも通知（見落とし防止）
-        try:
-            self.listing_manager.notify(
-                f"⚠️ 重複登録の疑い\n作品「{title}」は既に登録済み: {where}\n"
-                f"（{acct} で登録しようとしています）"
-            )
-        except Exception:
-            pass
+        # 重複疑いのDiscord通知は無効化（手動運用に変更）。ダイアログのみで確認する。
         return messagebox.askyesno(
             "重複の疑い",
             f"作品「{title}」は既に別アカウントに登録されています:\n{where}\n\n"
@@ -2466,6 +2829,9 @@ class FanzaAutoInputApp:
             return
         label = TABLE_LABELS[res["table_type"]]
         extra = "（当月出品済みのため翌月へ繰り上げ）" if res.get("carried_next") else ""
+        rsv = res.get("reserved_listed")
+        if rsv and not rsv.get("already"):
+            extra += f" / 予約出品管理表 {rsv['ym']} 枠{rsv['slot_no']} を出品済に更新"
         self.status_var.set(
             f"管理表更新: {res['account']} {res['ym']} {label} 枠{res['slot_no']} "
             f"({res['filled']}/{SLOTS_PER_MONTH}){extra}"
@@ -2529,7 +2895,7 @@ class FanzaAutoInputApp:
 
         cols = ("account", "circle", "slot1", "slot2", "slot3", "count", "state")
         self.mgmt_tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
-                                      selectmode="browse", height=18)
+                                      selectmode="extended", height=18)
         headers = [("account", "アカウント", 90), ("circle", "サークル名", 130),
                    ("slot1", "枠1", 200), ("slot2", "枠2", 200), ("slot3", "枠3", 200),
                    ("count", "消化", 50), ("state", "状態", 70)]
@@ -2543,20 +2909,25 @@ class FanzaAutoInputApp:
         self.mgmt_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # 行の色分けタグ（緑=完了/黄=進行中/赤=未着手）
-        self.mgmt_tree.tag_configure("green", background="#14532d", foreground="#c6efce")
+        # 行の色分けタグ（4段階: 未着手=灰 / 進行中=黄 / 予約出品済=青 / 完了=緑）
+        self.mgmt_tree.tag_configure("gray", background="#3f3f46", foreground="#d4d4d8")
         self.mgmt_tree.tag_configure("yellow", background="#5c4a00", foreground="#ffe9a6")
-        self.mgmt_tree.tag_configure("red", background="#5c1a25", foreground="#ffc7ce")
+        self.mgmt_tree.tag_configure("blue", background="#1e3a5f", foreground="#bfdbfe")
+        self.mgmt_tree.tag_configure("green", background="#14532d", foreground="#c6efce")
+        # 運用停止アカウント（赤）
+        self.mgmt_tree.tag_configure("red", background="#7f1d1d", foreground="#fecaca")
 
         # --- 手動修正バー ---
         edit = ttk.LabelFrame(frame, text="手動修正（自動判定のズレを補正）", padding=8)
         edit.pack(fill=tk.X, padx=5, pady=5)
 
-        ttk.Label(edit, text="対象: 上で行を選択 →").pack(side=tk.LEFT, padx=2)
-        ttk.Label(edit, text="枠:").pack(side=tk.LEFT, padx=(6, 2))
+        ttk.Label(edit, text="対象: 上で行を選択（Ctrl/Shiftで複数可）→").pack(side=tk.LEFT, padx=2)
+        ttk.Label(edit, text="枠(1から累積):").pack(side=tk.LEFT, padx=(6, 2))
         self.mgmt_slot_var = tk.StringVar(value="1")
+        # 出品は必ず枠1から順に埋まるため累積選択:
+        #   '1'→枠1 / '2'→枠1,2 / '全'→枠1,2,3（「3だけ」はあり得ないので数字は末尾を除く）
         ttk.Combobox(edit, textvariable=self.mgmt_slot_var,
-                     values=[str(i) for i in range(1, SLOTS_PER_MONTH + 1)],
+                     values=[str(i) for i in range(1, SLOTS_PER_MONTH)] + ["全"],
                      width=4, state="readonly").pack(side=tk.LEFT, padx=2)
         ttk.Button(edit, text="ON", command=lambda: self.manual_toggle(True)).pack(side=tk.LEFT, padx=2)
         ttk.Button(edit, text="OFF", command=lambda: self.manual_toggle(False)).pack(side=tk.LEFT, padx=2)
@@ -2592,9 +2963,28 @@ class FanzaAutoInputApp:
         counts = self.listing_manager.fill_counts(ym, table_type)
         names = self.listing_manager.account_names()
         shown = 0
+        # 状態別の集計（フィルタに関係なく全アカウント分）
+        state_tally = {"未着手": 0, "進行中": 0, "予約出品済": 0, "完了": 0}
         for account in self.listing_manager.accounts():
             slots = _db.get_slots(ym, account, table_type, self.listing_manager.db_path)
             count = counts.get(account, 0)
+
+            # 運用停止アカウントは赤表示・状態「運用停止」。作業集計・フィルタ対象外。
+            if account in STOPPED_ACCOUNTS:
+                cells = []
+                for s in range(1, SLOTS_PER_MONTH + 1):
+                    row = next((r for r in slots if r["slot_no"] == s), None)
+                    cells.append(self._slot_cell_text(row, table_type))
+                self.mgmt_tree.insert(
+                    "", tk.END, iid=account,
+                    values=(account, names.get(account, ""),
+                            cells[0], cells[1], cells[2], f"{count}/3", "運用停止"),
+                    tags=("red",))
+                shown += 1
+                continue
+
+            label, color = self.listing_manager.account_state(slots, table_type)
+            state_tally[label] = state_tally.get(label, 0) + 1
             if filt == "0枠（未着手）のみ" and count != 0:
                 continue
             if filt == "あと1枠だけ空き" and count != SLOTS_PER_MONTH - 1:
@@ -2606,9 +2996,7 @@ class FanzaAutoInputApp:
             cells = []
             for s in range(1, SLOTS_PER_MONTH + 1):
                 row = next((r for r in slots if r["slot_no"] == s), None)
-                cells.append(self._slot_cell_text(row))
-            color = self.listing_manager.status_color(count)
-            label = {"green": "完了", "yellow": "進行中", "red": "未着手"}[color]
+                cells.append(self._slot_cell_text(row, table_type))
             self.mgmt_tree.insert(
                 "", tk.END, iid=account,
                 values=(account, names.get(account, ""),
@@ -2616,16 +3004,19 @@ class FanzaAutoInputApp:
                 tags=(color,))
             shown += 1
 
-        zero = len(self.listing_manager.accounts_zero(ym, table_type))
-        one = len(self.listing_manager.accounts_one_left(ym, table_type))
-        incomplete = len(self.listing_manager.accounts_incomplete(ym, table_type))
-        done = sum(1 for cnt in counts.values() if cnt >= SLOTS_PER_MONTH)
+        unlisted = self.listing_manager.unlisted_slot_count(ym, table_type)
+        # 予約出品済は予約出品管理表のみ意味を持つので、その表のときだけ表示
+        reserved_part = ""
+        if table_type == TABLE_RESERVED:
+            reserved_part = f" / 予約出品済 {state_tally['予約出品済']}"
         self.mgmt_summary_var.set(
             f"{ym} {self.mgmt_table_var.get()} ｜ 表示 {shown}件 ｜ "
-            f"完了 {done} / 3枠未満 {incomplete}（あと1枠 {one} / 未着手 {zero}）")
+            f"完了 {state_tally['完了']}{reserved_part} / 進行中 {state_tally['進行中']} "
+            f"/ 未着手 {state_tally['未着手']}"
+            f" ｜ 未出品 {unlisted}枠（対象サークルのみ）")
 
     @staticmethod
-    def _slot_cell_text(row):
+    def _slot_cell_text(row, table_type=TABLE_LISTING):
         if not row:
             return ""
         from management.db import is_occupied
@@ -2633,48 +3024,69 @@ class FanzaAutoInputApp:
             if row.get("status") == "却下" and row.get("product_title"):
                 return f"（却下:{row['product_title']}）"
             return ""
+        title = row.get("product_title") or ""
+        status = row.get("status") or ""
+        # 予約出品管理表は枠単位で状態を明示（予約 / 出品済 / 配信申請済）
+        if table_type == TABLE_RESERVED:
+            tag = status if status else "予約"
+            return f"〔{tag}〕{title}".rstrip()
+        # 出品管理表(通常)は 作品入力済＝出品完了
         parts = ["✓"]
-        if row.get("product_title"):
-            parts.append(row["product_title"])
-        if row.get("status"):
-            parts.append(f"[{row['status']}]")
+        if title:
+            parts.append(title)
+        if status:
+            parts.append(f"[{status}]")
         return " ".join(parts)
 
-    def _selected_account(self):
-        sel = self.mgmt_tree.selection() if hasattr(self, "mgmt_tree") else None
+    def _selected_accounts(self):
+        """選択中の全アカウント（複数選択可）。未選択なら警告してNone。"""
+        sel = list(self.mgmt_tree.selection()) if hasattr(self, "mgmt_tree") else []
         if not sel:
-            messagebox.showwarning("未選択", "対象アカウントの行を選択してください。")
+            messagebox.showwarning(
+                "未選択",
+                "対象アカウントの行を選択してください。\n"
+                "（Ctrl+クリックで複数選択、Shift+クリックで範囲選択できます）")
             return None
-        return sel[0]
+        return sel
+
+    def _selected_slots(self):
+        """枠セレクタの選択を枠番号リストにする（枠1から累積）。
+
+        出品は必ず枠1から順に埋まり「枠3だけ」はあり得ないため累積で返す:
+          '1'→[1] / '2'→[1,2] / '全'→[1,2,3]
+        """
+        sel = self.mgmt_slot_var.get()
+        if sel == "全":
+            return list(range(1, SLOTS_PER_MONTH + 1))
+        return list(range(1, int(sel) + 1))
 
     def manual_toggle(self, checked):
-        account = self._selected_account()
-        if not account:
+        accounts = self._selected_accounts()
+        if not accounts:
             return
         ym, table_type = self._mgmt_ctx()
-        slot_no = int(self.mgmt_slot_var.get())
-        title = None
-        if checked:
-            title = simpledialog.askstring(
-                "作品名（任意）",
-                f"{account} {ym} {TABLE_LABELS[table_type]} 枠{slot_no} に入れる作品名\n"
-                "（空欄可・後から編集不要ならそのままOK）",
-                parent=self.root) or None
-        self.listing_manager.set_manual(account, table_type, ym, slot_no, checked, title)
+        slots = self._selected_slots()
+        for account in accounts:
+            for s in slots:
+                self.listing_manager.set_manual(account, table_type, ym, s, checked)
         self.refresh_management_view()
 
     def apply_status(self):
-        account = self._selected_account()
-        if not account:
+        accounts = self._selected_accounts()
+        if not accounts:
             return
         ym, table_type = self._mgmt_ctx()
-        slot_no = int(self.mgmt_slot_var.get())
+        slots = self._selected_slots()
         status = self.mgmt_status_var.get()
-        self.listing_manager.set_status(account, table_type, ym, slot_no, status)
+        for account in accounts:
+            for s in slots:
+                self.listing_manager.set_status(account, table_type, ym, s, status)
         if status == "却下":
+            where = "全枠" if self.mgmt_slot_var.get() == "全" else f"枠{'・'.join(map(str, slots))}"
+            who = f"{len(accounts)}アカウント" if len(accounts) > 1 else accounts[0]
             messagebox.showinfo(
                 "枠を解放",
-                f"{account} 枠{slot_no} を却下として枠を空きに戻しました。")
+                f"{who} {where} を却下として空きに戻しました。")
         self.refresh_management_view()
 
     def import_management_excel(self):

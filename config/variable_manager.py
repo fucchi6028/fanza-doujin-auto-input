@@ -272,9 +272,14 @@ def count_images_in_masked_zip(product_path: Path, masked_title: str = "") -> in
     完成品はタイトルの2文字目を伏字にしたZIPで納品されるため、配信申請ページの
     「枚数」にはこのZIP内の画像点数を使う。ZIPを解凍せず中身の一覧だけを数える。
 
+    商品フォルダには本編ZIP（商品名の2文字目を伏字にしたZIP・画像多数）と、
+    パッケージ用の小さなZIP（シリーズ名を含む・画像数枚）が同居することがある。
+    枚数は本編ZIPの画像点数を使う必要があるため、名前一致で拾えない場合は
+    「伏字ZIPのうち画像枚数が最も多いもの」を本編とみなす。
+
     Args:
         product_path: 商品フォルダのパス
-        masked_title: 伏字済みタイトル（例:「シリーズ名 A〇C」）。一致するZIPを優先する。
+        masked_title: 本編ZIPの伏字タイトル（例:「A〇C Vol.2」）。一致するZIPを優先する。
 
     Returns:
         ZIP内の画像枚数（該当ZIPが見つからなければ0）
@@ -303,22 +308,24 @@ def count_images_in_masked_zip(product_path: Path, masked_title: str = "") -> in
             print(f"Read zip error ({zip_path.name}): {e}")
             return 0
 
-    # 1. 伏字タイトルと完全一致するZIPを優先
+    # 1. 伏字タイトルと完全一致するZIPを優先（本編ZIP＝商品名の伏字名）
     if masked_title:
         for zf in zip_files:
             if zf.stem == masked_title:
                 return _count_in_zip(zf)
 
-    # 2. 名前に伏字文字（〇 U+3007 / ○ U+25CB）を含むZIPを優先
-    masked_zips = [zf for zf in zip_files if "〇" in zf.name or "○" in zf.name]
-    if masked_zips:
-        return _count_in_zip(masked_zips[0])
+    # 2. 名前に伏字文字（〇 U+3007 / ○ U+25CB）を含むZIPを候補にする。
+    #    パッケージ用の小さなZIPと本編ZIPが混在するため、画像枚数が最も多い
+    #    ものを本編とみなす（先頭を無条件に採用しない）。
+    candidates = [zf for zf in zip_files if "〇" in zf.name or "○" in zf.name]
 
-    # 3. ZIPが1つだけならそれを枚数元とみなす
-    if len(zip_files) == 1:
-        return _count_in_zip(zip_files[0])
+    # 3. 伏字ZIPが無い場合はZIP全体から選ぶ（1つだけならそれを採用）
+    if not candidates:
+        if len(zip_files) == 1:
+            return _count_in_zip(zip_files[0])
+        candidates = zip_files
 
-    return 0
+    return max((_count_in_zip(zf) for zf in candidates), default=0)
 
 
 def mask_second_char(text: str) -> str:

@@ -12,7 +12,8 @@ from management import db
 from management import discord_notify
 from management.db import (
     TABLE_LISTING, TABLE_RESERVED, SLOTS_PER_MONTH,
-    STATUS_REJECTED, OP_LISTING, OP_RESERVED, OP_TRAILER,
+    STATUS_REJECTED, STATUS_LISTED, STATUS_RESERVED,
+    OP_LISTING, OP_RESERVED, OP_TRAILER,
     OP_MANUAL, OP_STATUS, OP_ROLLOVER,
     normalize_account, account_sort_key, is_occupied,
 )
@@ -21,6 +22,23 @@ WEBHOOK_KEY = "discord_webhook_url"
 MONTHLY_NOTICE_KEY = "last_monthly_notice_ym"
 
 TABLE_LABELS = {TABLE_LISTING: "出品管理表", TABLE_RESERVED: "予約出品管理表"}
+
+# ── 4段階ステータス（GUI・Excel共用） ───────────────────
+# 未着手 → 進行中 → （予約出品済） → 完了
+# 出品管理表(通常): 作品入力した時点で「完了」。予約出品済の段階は無い。
+# 予約出品管理表   : 予約作品入力＝「予約出品済」。その後に配信申請したら「完了」。
+STATE_NONE = "未着手"
+STATE_WIP = "進行中"
+STATE_RESERVED = "予約出品済"
+STATE_DONE = "完了"
+
+# 色キー（GUI=Treeviewタグ名 / Excel=塗り分けキーとして共用）
+STATE_COLOR = {
+    STATE_NONE: "gray",
+    STATE_WIP: "yellow",
+    STATE_RESERVED: "blue",
+    STATE_DONE: "green",
+}
 
 
 # ── 年月ユーティリティ ──────────────────────────────────
@@ -210,8 +228,42 @@ class ListingManager:
         return self._record(ym or current_ym(), account, TABLE_RESERVED,
                             title, product_id, OP_RESERVED)
 
+    def mark_reserved_listed(self, account, title):
+        """配信申請した予告作品に対応する『予約出品管理表』の枠を『出品済』(完了)にする。
+
+        予約作品はタイトルで登録されているので、月をまたいで account の予約枠を
+        タイトル突合し、該当枠の status を STATUS_LISTED に更新する。
+        戻り値: 更新した枠情報 dict / 既に出品済なら already=True / 見つからなければ None。
+        """
+        if not account or not title:
+            return None
+        key = normalize_title(title)
+        for r in db.get_account_slots(account, TABLE_RESERVED, self.db_path):
+            if not is_occupied(r) or not r.get("product_title"):
+                continue
+            if normalize_title(r["product_title"]) != key:
+                continue
+            if r.get("status") == STATUS_LISTED:
+                return {"ym": r["ym"], "slot_no": r["slot_no"], "already": True,
+                        "product_title": r.get("product_title")}
+            old = r.get("status") or ""
+            db.update_slot(r["ym"], account, TABLE_RESERVED, r["slot_no"],
+                           status=STATUS_LISTED, source_op=OP_STATUS,
+                           db_path=self.db_path)
+            db.add_log(r["ym"], account, TABLE_RESERVED, r["slot_no"], OP_STATUS,
+                       detail=f"配信申請完了 → 予約枠を『{STATUS_LISTED}』に更新",
+                       product_title=r.get("product_title"),
+                       old_status=old, new_status=STATUS_LISTED, db_path=self.db_path)
+            return {"ym": r["ym"], "slot_no": r["slot_no"], "already": False,
+                    "product_title": r.get("product_title")}
+        return None
+
     def record_trailer(self, account, title, product_id=None):
-        """予告出品（配信申請）→ 出品管理表を見て当月0枠なら当月、出品済みなら翌月。"""
+        """予告出品（配信申請）→ 出品管理表を見て当月0枠なら当月、出品済みなら翌月。
+
+        さらに、同じ作品が『予約出品管理表』に予約出品済で載っていれば、その枠の
+        ステータスを『出品済』(完了)へ自動更新する（予約→配信申請完了の反映）。
+        """
         cur = current_ym()
         nxt = next_ym(cur)
         self.ensure_months([cur, nxt])
@@ -232,6 +284,14 @@ class ListingManager:
         result = {"ok": True, "ym": target, "account": account,
                   "table_type": TABLE_LISTING, "slot_no": slot_no,
                   "filled": filled, "carried_next": target == nxt, "notified": []}
+        # 予約出品管理表に同一作品があれば『出品済』(完了)へ反映
+        reserved = self.mark_reserved_listed(account, title)
+        result["reserved_listed"] = reserved
+        if reserved and not reserved.get("already"):
+            msg = (f"📕 予約→配信申請完了: {account} {reserved['ym']} 予約出品管理表 "
+                   f"枠{reserved['slot_no']} を『{STATUS_LISTED}』に更新\n作品: {title}")
+            if self.notify(msg):
+                result["notified"].append(msg)
         if target == nxt:
             msg = (f"➡️ 予告出品で翌月へ繰り上げ: {account} は当月出品済みのため "
                    f"{nxt} の出品管理表 枠{slot_no} にチェック（見落とし注意）\n作品: {title}")
@@ -258,9 +318,16 @@ class ListingManager:
                         f"3/3 到達（手動）")
 
     def set_status(self, account, table_type, ym, slot_no, status):
+        self.ensure_months([ym])
         rows = db.get_slots(ym, account, table_type, self.db_path)
         old = next((r["status"] for r in rows if r["slot_no"] == slot_no), "")
+        # 「出品済」「申請中」等の“使用中”ステータスを付けたら枠を占有(checked=1)にする。
+        # 未予約(checked=0)の枠に出品済を付けても、占有しないと is_occupied=False で
+        # 表示に出ず「設定できない」ように見えるため。空・却下は占有を変えない
+        # （却下は is_occupied 側で空き扱いのまま＝自動解放）。
+        occupy = bool(status) and status != STATUS_REJECTED
         db.update_slot(ym, account, table_type, slot_no, status=status,
+                       checked=(True if occupy else None),
                        source_op=OP_STATUS, db_path=self.db_path)
         db.add_log(ym, account, table_type, slot_no, OP_STATUS,
                    detail=f"ステータス {old or '(なし)'} → {status or '(なし)'}",
@@ -282,6 +349,29 @@ class ListingManager:
         return sorted([a for a, c in self.fill_counts(ym, table_type).items() if c == 0],
                       key=account_sort_key)
 
+    @staticmethod
+    def _is_unlisted_target(code, names):
+        """未出品カウントの対象アカウントか。
+
+        サークル名（accounts.name）が空、および AI-* / K-* は対象外。
+        """
+        code = (code or "").strip()
+        if code.startswith("AI-") or code.startswith("K-"):
+            return False
+        return bool((names.get(code) or "").strip())
+
+    def unlisted_slot_count(self, ym, table_type=TABLE_LISTING):
+        """未出品（チェックが入っていない空き枠）の合計数を返す。
+
+        サークル名を持つアカウントのみを対象とし、AI-*/K-* とサークル名が
+        空のアカウントは対象外。却下は空き扱い（is_occupied に準拠）。
+        """
+        names = self.account_names()
+        return sum(
+            1 for r in db.get_month_rows(ym, table_type, self.db_path)
+            if self._is_unlisted_target(r["account"], names) and not is_occupied(r)
+        )
+
     def accounts_one_left(self, ym, table_type=TABLE_LISTING):
         """あと1枠だけ空き = 2枠消化済みのアカウント。"""
         return sorted([a for a, c in self.fill_counts(ym, table_type).items()
@@ -294,12 +384,42 @@ class ListingManager:
 
     @staticmethod
     def status_color(count):
-        """緑=完了 / 黄=進行中 / 赤=未着手 を返す（Excel・GUI共用）。"""
+        """緑=完了 / 黄=進行中 / 赤=未着手 を返す（消化枠数ベース・後方互換用）。"""
         if count >= SLOTS_PER_MONTH:
             return "green"
         if count > 0:
             return "yellow"
         return "red"
+
+    @staticmethod
+    def account_state(rows, table_type):
+        """アカウント1行の4段階ステータスを返す → (ラベル, 色キー)。
+
+        rows: そのアカウント・その月・その表のスロット行（dict）の集まり。
+        表ごとにライフサイクルが異なる:
+          出品管理表(通常)     : 0枠=未着手 / 1〜2枠=進行中 / 3枠=完了
+                                （作品入力した時点で完了。予約出品済は無し）
+          予約出品管理表(予約) : 0枠=未着手 / 1〜2枠=進行中 /
+                                3枠だが配信申請が未完=予約出品済 /
+                                3枠かつ全枠 配信申請済=完了
+        「配信申請済」= その枠の status が空でない（申請中/承認待ち/承認済み）。
+        却下は is_occupied 上で空き扱いのため occ に含まれない。
+        """
+        rows = list(rows)
+        occupied = [r for r in rows if is_occupied(r)]
+        occ = len(occupied)
+        if occ == 0:
+            return STATE_NONE, STATE_COLOR[STATE_NONE]
+        if occ < SLOTS_PER_MONTH:
+            return STATE_WIP, STATE_COLOR[STATE_WIP]
+        # 3枠すべて埋まっている
+        if table_type == TABLE_RESERVED:
+            # 「予約」ステータスは確保のみで配信申請済ではない → 完了に数えない
+            applied = sum(1 for r in occupied
+                          if r.get("status") and r.get("status") != STATUS_RESERVED)
+            if applied < SLOTS_PER_MONTH:
+                return STATE_RESERVED, STATE_COLOR[STATE_RESERVED]
+        return STATE_DONE, STATE_COLOR[STATE_DONE]
 
     def pace(self, ym, table_type=TABLE_LISTING):
         """日別の消化枠数推移。checked_at の日付で集計。"""
@@ -316,7 +436,9 @@ class ListingManager:
         zero = self.accounts_zero(ym, TABLE_LISTING)
         one = self.accounts_one_left(ym, TABLE_LISTING)
         incomplete = self.accounts_incomplete(ym, TABLE_LISTING)
+        unlisted = self.unlisted_slot_count(ym, TABLE_LISTING)
         lines = [f"📊 {ym} 出品管理 日次レポート"]
+        lines.append(f"■ 未出品の空き枠（対象サークルのみ）: {unlisted}枠")
         lines.append(f"■ 今月まだ0枠（未着手）: {len(zero)}件")
         lines.append("　" + ("、".join(zero) if zero else "なし"))
         lines.append(f"■ あと1枠だけ空き: {len(one)}件")
@@ -350,7 +472,4 @@ class ListingManager:
         if profile_names:
             self.sync_accounts(profile_names)
         self.ensure_months()
-        try:
-            self.maybe_send_monthly_notice()
-        except Exception as e:
-            print(f"[manager] monthly notice skipped: {e}")
+        # 月初のDiscord通知は無効化（手動運用に変更）

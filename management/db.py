@@ -25,11 +25,14 @@ TABLE_RESERVED = "reserved"   # 予約出品管理表（予約出品）
 SLOTS_PER_MONTH = 3           # 1アカウント3作品/月
 
 # 配信申請ステータス
+STATUS_RESERVED = "予約"        # 予約枠として確保のみ（配信申請はまだ＝予約出品済）
+STATUS_LISTED = "出品済"        # 予約出品→配信申請まで済んだ枠（＝完了）
 STATUS_APPLYING = "申請中"
 STATUS_WAITING = "承認待ち"
 STATUS_APPROVED = "承認済み"
 STATUS_REJECTED = "却下"
-STATUS_LIST = ["", STATUS_APPLYING, STATUS_WAITING, STATUS_APPROVED, STATUS_REJECTED]
+STATUS_LIST = ["", STATUS_RESERVED, STATUS_LISTED, STATUS_APPLYING,
+               STATUS_WAITING, STATUS_APPROVED, STATUS_REJECTED]
 
 # 操作種別（ログ用）
 OP_LISTING = "作品入力"
@@ -252,6 +255,17 @@ def get_slots(ym: str, account: str, table_type: str, db_path=None):
             "SELECT * FROM slots WHERE ym=? AND account=? AND table_type=? "
             "ORDER BY slot_no",
             (ym, account, table_type),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_account_slots(account: str, table_type: str, db_path=None):
+    """指定アカウント・表の全月の枠を返す（月をまたぐタイトル突合に使う）。"""
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM slots WHERE account=? AND table_type=? "
+            "ORDER BY ym, slot_no",
+            (account, table_type),
         ).fetchall()
     return [dict(r) for r in rows]
 
