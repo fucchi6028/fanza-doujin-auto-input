@@ -216,41 +216,145 @@ class FanzaFormFiller:
         except Exception:
             pass
 
-    def _form_is_ready(self, timeout: int = 15) -> bool:
-        """フォームの主要素が表示され、入力可能な状態かを確認する。
+    def _page_fully_loaded(self, timeout: int = 15) -> bool:
+        """document.readyState が complete になるまで待つ。"""
+        try:
+            WebDriverWait(self.driver, timeout).until(
+                lambda d: d.execute_script("return document.readyState") == "complete"
+            )
+            return True
+        except Exception:
+            return False
+
+    def _is_point_blocked(self, selector: str) -> bool:
+        """selector要素の中心が別要素（読み込み中オーバーレイ等）に覆われているか判定する。
+
+        画面が白い（半透明の読み込みレイヤーが被っている）とき、要素はDOMに存在しても
+        クリック/入力が React に伝わらない。elementFromPoint で、要素の中心を実際に
+        クリックしたとき最前面に来るのが対象要素（またはそのラベル）かを調べ、
+        別要素が被っていれば True を返す。判定不能時は False（ブロック扱いにしない）。
+        """
+        try:
+            return bool(self.driver.execute_script(
+                """
+                var sel = arguments[0];
+                var el = document.querySelector(sel);
+                if (!el) return false;
+                var r = el.getBoundingClientRect();
+                // 対象が0サイズ（カスタムUIで視覚的に隠した素のinput等）なら、
+                // 紐づくラベルの座標で代替して判定する
+                var ref = el;
+                if (r.width === 0 || r.height === 0) {
+                    var lab = null;
+                    if (el.id) lab = document.querySelector("label[for='" + el.id + "']");
+                    if (!lab && el.closest) lab = el.closest('label');
+                    if (lab) { ref = lab; r = lab.getBoundingClientRect(); }
+                }
+                if (r.width === 0 || r.height === 0) return true;  // 本当に非表示＝未準備
+                var cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+                var top = document.elementFromPoint(cx, cy);
+                if (!top) return true;
+                // 最前面が対象（または基準ラベル）の内外・同一ラベル配下なら覆われていない
+                if (top === el || el.contains(top) || top.contains(el)) return false;
+                if (top === ref || ref.contains(top) || top.contains(ref)) return false;
+                var tl = top.closest ? top.closest('label') : null;
+                if (tl && tl.querySelector(sel)) return false;
+                return true;  // 別要素（オーバーレイ）が被っている
+                """,
+                selector,
+            ))
+        except Exception:
+            return False
+
+    def _wait_form_interactable(self, selector: str, timeout: int = 15) -> bool:
+        """画面が白い（読み込み中オーバーレイが被った）状態が解け、対象要素が実際に
+        操作可能になるまで待つ。
+
+        制限時間内に確認できなくても（誤検出で止め続けないよう）最終的には続行する。
+        実際に操作可能を確認できたときのみ True を返す。
+        """
+        el = None
+        try:
+            el = self.driver.find_element(By.CSS_SELECTOR, selector)
+            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+        except Exception:
+            el = None
+
+        deadline = time.time() + timeout
+        warned = False
+        while time.time() < deadline:
+            self._accept_any_alert()
+            enabled = True
+            try:
+                if el is not None:
+                    enabled = el.is_enabled()
+            except Exception:
+                el = None
+            if enabled and not self._is_point_blocked(selector):
+                time.sleep(0.4)  # 再描画の安定待ち
+                if not self._is_point_blocked(selector):
+                    return True
+            if not warned:
+                self._report("フォームの読み込み（画面が白い状態）が解けるのを待っています...")
+                warned = True
+            time.sleep(0.4)
+        self._report("フォームの読み込み完了を確認できませんでしたが、入力を試みます。")
+        return False
+
+    def _form_is_ready(self, timeout: int = 20) -> bool:
+        """フォームの主要素が表示され、実際に入力可能な状態かを確認する。
 
         単に driver.get した直後は、未ログイン・リダイレクト・離脱確認ダイアログ等で
-        目的のフォームが開いていないことがある。1ステップ目のラジオ(article_type)が
-        実際に存在するまで待ってから入力を始めることで、フォーム未表示のまま入力が
-        進んで「完了」と誤報告されるのを防ぐ。
+        目的のフォームが開いていないことがある。さらに、要素がDOMに存在しても画面が
+        白い（読み込み中オーバーレイが被った）状態では入力が React に反映されない。
+        そこで 1) ページ読み込み完了 2) 1ステップ目のラジオ(article_type)の出現
+        3) 画面が白い状態が解けて実際に操作可能になること、の3段階を待ってから入力を
+        始めることで、フォーム未準備のまま入力が進んで「完了」と誤報告されるのを防ぐ。
         """
         self._accept_any_alert()
+        self._page_fully_loaded(min(timeout, 15))
         try:
             WebDriverWait(self.driver, timeout).until(
                 EC.presence_of_element_located(
                     (By.CSS_SELECTOR, self.FORM_READY_SELECTOR)
                 )
             )
-            return True
         except Exception:
             return False
+        # 画面が白い（読み込みオーバーレイ）状態が解けて操作可能になるまで待つ
+        self._wait_form_interactable(self.FORM_READY_SELECTOR, timeout=min(timeout, 15))
+        return True
+
+    def _open_and_wait_ready(self, attempts: int = 3) -> bool:
+        """フォームを開き、画面が白い状態が解けて入力可能になるまで待つ。
+
+        準備できなければページを再読み込みして最大 attempts 回試す。
+        毎回は準備できないことがある（背面タブのスロットリングや読み込み遅延）ため、
+        リトライで「画面が白いまま進んで貼り付けできない」不具合を防ぐ。
+        """
+        for i in range(1, attempts + 1):
+            if not self._open_form_in_new_tab():
+                time.sleep(1.0)
+                continue
+            if self._form_is_ready():
+                return True
+            if i < attempts:
+                self._report(
+                    f"フォームがまだ準備できていません。再読み込みします（{i}/{attempts}）"
+                )
+                time.sleep(1.0)
+        return False
 
     def _open_form_in_new_tab(self) -> bool:
-        """フォームURLを新しいタブ（最前面）で開く。開けたら True。
+        """フォームURLを現在のタブで開く。開けたら True。
 
-        AdsPowerの既存Chromeに debuggerAddress でアタッチすると、Seleniumが
-        操作するタブ(current_window_handle)がユーザーの見ているタブと一致せず、
-        裏のタブに get() してフォームを埋め、画面上は何も変わらないのに「完了」
-        になることがある。必ず新しいタブを開いてそこで操作することで、ユーザーに
-        見える前面タブでフォームを開く。前回入力タブの離脱確認ダイアログも回避できる。
+        以前は毎回「新しいタブ」を開いてそこで操作していたが、AdsPowerに
+        アタッチしたChromeでは新タブが前面化されず背面タブのままになることがあり、
+        Chromeの背面タブスロットリング（タイマー/描画の抑制）でアップロードが
+        極端に遅くなる不具合があった。アップロード速度を優先し、現在タブで
+        get() する元の挙動に戻す。離脱確認ダイアログは承諾してから遷移する。
         """
         self._accept_any_alert()
-        try:
-            self.driver.switch_to.new_window("tab")
-        except Exception as e:
-            # 新規タブを開けない環境では現在のタブにフォールバック
-            self._report(f"新しいタブを開けませんでした（現在のタブで続行）: {e}")
-            self._accept_any_alert()
         try:
             self.driver.get(self.FORM_URL)
             return True
@@ -267,13 +371,267 @@ class FanzaFormFiller:
             self._report(f"フォームページへの遷移に失敗しました: {e}")
             return False
 
+    # ------------------------------------------------------------------
+    # ステップ形式（ウィザード）フォーム対応
+    #
+    # 2026年11月のFANZA仕様変更で、登録フォームは1ページの縦長フォームから
+    # 「基本情報 → ファイル登録 → 詳細情報 → 販売情報・その他」の4ステップ
+    # 形式になった。「次へ」「戻る」は入力チェックなしでステップを切り替える
+    # だけで、入力値はページ内（React/Redux）に保持される。ただし DOM には
+    # 表示中ステップの項目しか存在しないため、各項目は該当ステップを表示して
+    # から入力する必要がある。
+    # ------------------------------------------------------------------
+    STEP_LABELS = ["基本情報", "ファイル登録", "詳細情報", "販売情報・その他"]
+    # 各ステップが表示中かを判定する目印（そのステップにしかない項目）
+    STEP_MARKERS = [
+        "input[name='title']",
+        "input[name='revision_flg']",
+        "input[name='section']",
+        "textarea[name='note']",
+    ]
+
+    def _current_step(self) -> int:
+        """表示中のステップ番号（0〜3）。判定できなければ -1。"""
+        for i, sel in enumerate(self.STEP_MARKERS):
+            try:
+                if self.driver.find_elements(By.CSS_SELECTOR, sel):
+                    return i
+            except Exception:
+                pass
+        return -1
+
+    def _click_step_nav(self, label: str) -> bool:
+        """フォーム下部の「次へ」/「戻る」ボタンを押す。押せたら True。"""
+        try:
+            buttons = self.driver.find_elements(By.CSS_SELECTOR, ".form-wrapper button")
+        except Exception:
+            return False
+        for btn in reversed(buttons):
+            try:
+                if btn.text.strip() == label and btn.is_enabled():
+                    self.driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center'});", btn
+                    )
+                    self.driver.execute_script("arguments[0].click();", btn)
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _go_to_step(self, target: int) -> bool:
+        """指定ステップ（0〜3）を表示する。表示できたら True。"""
+        name = self.STEP_LABELS[target]
+        for _ in range(10):
+            self._accept_any_alert()
+            cur = self._current_step()
+            if cur == target:
+                self._wait_form_interactable(self.STEP_MARKERS[target], timeout=10)
+                time.sleep(0.3)
+                return True
+            if cur == -1:
+                time.sleep(0.5)
+                continue
+            label = "次へ" if cur < target else "戻る"
+            if not self._click_step_nav(label):
+                time.sleep(0.5)
+                continue
+            # ステップ切り替え（再描画）を待つ
+            for _ in range(20):
+                time.sleep(0.3)
+                if self._current_step() != cur:
+                    break
+        self._report(f"「{name}」ステップを表示できませんでした。")
+        return False
+
+    def _advance_until(self, selector: str, max_clicks: int = 3) -> bool:
+        """selector の要素が表示されるまで「次へ」を押してステップを進める。
+
+        ステップ形式でないページ（要素が最初からある）では何もしない。
+        配信申請（予告本登録）ページなど、ステップ番号の目印が異なるページ用。
+        """
+        for _ in range(max_clicks + 1):
+            try:
+                if self.driver.find_elements(By.CSS_SELECTOR, selector):
+                    self._wait_form_interactable(selector, timeout=10)
+                    return True
+            except Exception:
+                pass
+            if not self._click_step_nav("次へ"):
+                return False
+            for _ in range(20):
+                time.sleep(0.3)
+                try:
+                    if self.driver.find_elements(By.CSS_SELECTOR, selector):
+                        break
+                except Exception:
+                    pass
+        return False
+
+    def _click_visible_ok(self) -> bool:
+        """表示中の確認ポップアップの「OK」ボタンを押す。押せたら True。"""
+        try:
+            cands = self.driver.find_elements(
+                By.XPATH, "//button[normalize-space(.)='OK'] | //a[normalize-space(.)='OK']"
+            )
+        except Exception:
+            cands = []
+        for btn in reversed(cands):
+            try:
+                if btn.is_displayed():
+                    self.driver.execute_script("arguments[0].click();", btn)
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _set_monopoly(self, value: str) -> bool:
+        """専売希望を設定する。
+
+        「希望する」を選ぶと「専売作品限定 違法アップロード自動巡回(β)のご確認」
+        ポップアップが出て、OK を押すまで選択が確定せず、ステップ移動もできなくなる。
+        そのため選択後にポップアップの OK を押して確定させる。
+        """
+        value = str(value)
+        sel = f"input[name='monopoly_hope_flg'][value='{value}']"
+        try:
+            radio = self.driver.find_element(By.CSS_SELECTOR, sel)
+        except Exception:
+            self._report(f"専売希望の選択肢が見つかりません（{value}）")
+            return False
+        if radio.is_selected():
+            return True
+        try:
+            self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", radio)
+            self.driver.execute_script("arguments[0].click();", radio)
+        except Exception as e:
+            self._report(f"専売希望の選択エラー: {e}")
+            return False
+
+        if value == "1":
+            # 確認ポップアップの OK を押す（最大約5秒待つ）
+            for _ in range(10):
+                time.sleep(0.5)
+                if self._click_visible_ok():
+                    self._report("専売の確認ポップアップでOKを押しました")
+                    break
+                try:
+                    if radio.is_selected():
+                        break
+                except Exception:
+                    pass
+        time.sleep(0.5)
+        try:
+            ok = radio.is_selected()
+        except Exception:
+            ok = False
+        self._report(
+            f"専売希望: {'希望する' if value == '1' else '希望しない'}"
+            + ("" if ok else "（要確認: 選択が反映されませんでした）")
+        )
+        return ok
+
+    def _draft_blocking(self) -> bool:
+        """「下書き保存されています」ダイアログで新規登録がブロックされているか。"""
+        try:
+            text = self.driver.find_element(By.TAG_NAME, "body").text
+        except Exception:
+            return False
+        return "下書き保存されているため" in text or "が下書き保存されています" in text
+
+    def _report_draft_blocking(self):
+        self._report(
+            "下書き保存中の作品があるため、新しい作品を登録できません。\n"
+            "FANZAの画面で下書きを登録完了させるか「下書きを削除」してから、"
+            "もう一度実行してください。"
+        )
+
+    def step_files_fill(self, data: dict):
+        """ファイル登録ステップ: 作品修正対応（ファイル自体は手動で登録）"""
+        self._report("ファイル登録ステップ: 作品修正対応を設定中...")
+        if data.get("revision_flg"):
+            self._click_radio("revision_flg", data["revision_flg"])
+        return True
+
+    def step_detail_fill(self, data: dict):
+        """詳細情報ステップ: 年齢指定・作品区分"""
+        self._report("詳細情報ステップ: 年齢指定・作品区分を選択中...")
+        if data.get("keyword_age"):
+            self._click_radio("keyword_age", data["keyword_age"])
+        if data.get("section"):
+            if self._click_radio("section", data["section"]):
+                self._report(f"作品区分選択完了: {data['section']}")
+        return True
+
+    def _fill_all_steps(self, data: dict, kind: str = "") -> bool:
+        """4ステップのフォームを順に入力する（配信作品・予告作品共通）。"""
+        self._report(f"=== {kind}自動入力開始 ===")
+
+        # フォームが開いていない状態で入力を始めて「完了」と誤報告しないよう、
+        # 入力開始前に主要素(article_type)の存在を必ず確認する。
+        if self._draft_blocking():
+            self._report_draft_blocking()
+            return False
+        if not self._form_is_ready():
+            self._report(
+                f"{kind}フォームが表示されていないため入力を中止しました。\n"
+                "フォームページが開いているか確認してください。"
+            )
+            return False
+
+        try:
+            # ---- 1. 基本情報 ----
+            if not self._go_to_step(0):
+                return False
+            if not self.step1_select_article_type(data.get("article_type", "cg")):
+                self._report("作品形式の選択に失敗したため入力を中止しました。")
+                return False
+            if not self.step2_select_ai_type(data.get("ai_generated_type", "2")):
+                return False
+            self.step3_fill_basic_info(data)
+            self.step4_fill_content_info(data)
+
+            # ---- 2. ファイル登録 ----
+            if not self._go_to_step(1):
+                return False
+            self.step_files_fill(data)
+
+            # ---- 3. 詳細情報 ----
+            if not self._go_to_step(2):
+                return False
+            self.step_detail_fill(data)
+            self.step5_fill_parody_info(data)
+            self.step6_select_keywords(data.get("keywords", []))
+
+            # ---- 4. 販売情報・その他 ----
+            if not self._go_to_step(3):
+                return False
+            self.step7_fill_sales_info(data)
+            self.step8_fill_other_info(data)
+
+            # ファイル（作品本体・画像）は手動登録のため、ファイル登録ステップを表示して終える
+            self._go_to_step(1)
+            try:
+                self.driver.execute_script("window.scrollTo({top: 0, behavior: 'smooth'});")
+            except Exception:
+                pass
+
+            self._report(
+                f"=== {kind}自動入力完了 ===\n"
+                "ファイル登録ステップを表示しました。作品ファイル・画像を登録してください。"
+            )
+            return True
+
+        except Exception as e:
+            self._report(f"エラーが発生しました: {e}")
+            return False
+
     def navigate_to_form(self):
         """登録フォームページに移動。フォームが開けたら True、開けなければ False。"""
         self._report("フォームページを開いています...")
-        if not self._open_form_in_new_tab():
-            return False
-
-        if not self._form_is_ready():
+        if not self._open_and_wait_ready():
+            if self._draft_blocking():
+                self._report_draft_blocking()
+                return False
             try:
                 cur = self.driver.current_url
             except Exception:
@@ -289,26 +647,79 @@ class FanzaFormFiller:
         self._report("フォームページを開きました")
         return True
 
-    def _click_radio(self, name: str, value: str):
-        """ラジオボタンを選択"""
+    def _radio_is_selected(self, name: str, value: str) -> bool:
+        """指定ラジオボタンが実際に選択済みかを返す（見つからなければ False）。"""
         try:
-            # 直接ラジオボタンをクリック
-            radio = self.driver.find_element(By.CSS_SELECTOR, f"input[name='{name}'][value='{value}']")
-            self.driver.execute_script("arguments[0].click();", radio)
-            time.sleep(0.5)
-            return True
-        except Exception as e:
-            # ラジオボタンが見つからない場合はラベルを試す
+            radio = self.driver.find_element(
+                By.CSS_SELECTOR, f"input[name='{name}'][value='{value}']"
+            )
+            return radio.is_selected()
+        except Exception:
+            return False
+
+    def _click_radio(self, name: str, value: str):
+        """ラジオボタンを選択。
+
+        React等の制御コンポーネントではJSの element.click() だけでは
+        onChange が拾われず、選択が state に反映されないことがある。
+        クリック後に is_selected() で実際に選択されたかを検証し、
+        反映されていなければ change イベントを明示発火して再試行する。
+        最終的に選択が確定したときのみ True を返す（誤った成功報告を防ぐ）。
+        """
+        def _dispatch_change(elem):
             try:
-                label = self.driver.find_element(
-                    By.CSS_SELECTOR, f"label[for='{name}--{value}']"
-                )
-                self.driver.execute_script("arguments[0].click();", label)
+                self.driver.execute_script("""
+                    var el = arguments[0];
+                    el.checked = true;
+                    el.dispatchEvent(new Event('click', { bubbles: true }));
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                """, elem)
+            except Exception:
+                pass
+
+        radio = None
+        try:
+            radio = self.driver.find_element(
+                By.CSS_SELECTOR, f"input[name='{name}'][value='{value}']"
+            )
+        except Exception:
+            radio = None
+
+        # 直接ラジオボタンをクリック → 検証 → 必要ならイベント発火で再試行
+        if radio is not None:
+            for attempt in range(3):
+                try:
+                    self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", radio)
+                except Exception:
+                    pass
+                try:
+                    self.driver.execute_script("arguments[0].click();", radio)
+                except Exception:
+                    pass
                 time.sleep(0.5)
+                if radio.is_selected():
+                    return True
+                # クリックで選択が反映されなかった → change イベントを明示発火
+                _dispatch_change(radio)
+                time.sleep(0.5)
+                if radio.is_selected():
+                    return True
+
+        # ラジオボタンが見つからない/選択できなかった場合はラベルを試す
+        try:
+            label = self.driver.find_element(
+                By.CSS_SELECTOR, f"label[for='{name}--{value}']"
+            )
+            self.driver.execute_script("arguments[0].click();", label)
+            time.sleep(0.5)
+            if self._radio_is_selected(name, value):
                 return True
-            except:
-                self._report(f"ラジオボタン選択エラー ({name}={value}): {e}")
-                return False
+        except Exception:
+            pass
+
+        self._report(f"ラジオボタン選択エラー ({name}={value}): 選択が反映されませんでした")
+        return False
 
     def _fill_input(self, name: str, value: str):
         """入力フィールドに値を設定"""
@@ -322,24 +733,43 @@ class FanzaFormFiller:
             return False
 
     def _fill_input_element(self, input_elem, value: str):
-        """入力要素に値を設定（要素を直接渡す版）"""
+        """入力要素に値を設定（要素を直接渡す版）。
+
+        重要: send_keys は要素が「interactable」でない（画面外・未フォーカス・
+        React再レンダリング直後など）と invalid element state 例外を投げる。
+        以前はこの例外が try 全体を抜けてしまい、本来その後に控えている
+        JavaScript方式（nativeInputValueSetter）のフォールバックに到達せず、
+        タイトル・ふりがな・価格などのテキスト欄が一切入らないのに
+        「入力完了」と誤報告されていた。send_keys は内側の try/except に隔離し、
+        失敗しても必ずJavaScript方式へフォールバックする。
+        """
         try:
-            # 要素をクリックしてフォーカス
-            self.driver.execute_script("arguments[0].click();", input_elem)
+            # 要素を画面内に入れてからクリックしてフォーカス
+            try:
+                self.driver.execute_script(
+                    "arguments[0].scrollIntoView({block:'center'});", input_elem
+                )
+            except Exception:
+                pass
+            try:
+                self.driver.execute_script("arguments[0].click();", input_elem)
+            except Exception:
+                pass
             time.sleep(0.2)
 
-            # まずsend_keysで直接入力を試す（最も確実な方法）
-            input_elem.clear()
-            time.sleep(0.1)
-            input_elem.send_keys(value)
-            time.sleep(0.2)
+            # まずsend_keysで直接入力を試す（最も確実だが interactable 必須）。
+            # ここが失敗しても下のJavaScript方式で確実に入れるため握りつぶす。
+            try:
+                input_elem.clear()
+                time.sleep(0.1)
+                input_elem.send_keys(value)
+                time.sleep(0.2)
+                if input_elem.get_attribute("value") == value:
+                    return True
+            except Exception:
+                pass
 
-            # 値が入ったか確認
-            current_value = input_elem.get_attribute("value")
-            if current_value == value:
-                return True
-
-            # send_keysで入らなかった場合、JavaScript方式を試す
+            # send_keysで入らなかった/失敗した場合、JavaScript方式を試す
             self.driver.execute_script("""
                 var input = arguments[0];
                 var value = arguments[1];
@@ -362,7 +792,12 @@ class FanzaFormFiller:
                 input.dispatchEvent(new Event('focus', { bubbles: true }));
             """, input_elem, value)
             time.sleep(0.3)
-            return True
+
+            # 実際に値が入ったかを確認して結果を返す（誤った成功報告を防ぐ）
+            try:
+                return input_elem.get_attribute("value") == value
+            except Exception:
+                return True
         except Exception as e:
             self._report(f"入力要素エラー: {e}")
             return False
@@ -524,15 +959,45 @@ class FanzaFormFiller:
             return None
 
     def step1_select_article_type(self, article_type: str):
-        """ステップ1: 作品形式を選択"""
+        """ステップ1: 作品形式を選択
+
+        作品形式（CG等）の選択は後続フィールドの再描画トリガーになるため、
+        ここで確実に選択を確定させてから次へ進む。選択が反映されないまま
+        先へ進むと最初の入力が飛ぶ（ユーザー報告の不具合）ため、
+        1) 選択が is_selected() で確定するまでリトライ
+        2) 選択確定後にフォームの再描画（AI利用欄の出現）を待つ
+        の両方を行う。
+        """
         self._report("ステップ1: 作品形式を選択中...")
 
         # article_type の値: comic, cg, game, voice
-        if self._click_radio("article_type", article_type):
-            time.sleep(1)  # UI更新待ち
-            self._report(f"作品形式を選択しました: {article_type}")
-            return True
-        return False
+        if not self._click_radio("article_type", article_type):
+            return False
+
+        # 選択が確実に反映されるまで確認（最大約4秒）
+        selected = False
+        for _ in range(8):
+            if self._radio_is_selected("article_type", article_type):
+                selected = True
+                break
+            time.sleep(0.5)
+        if not selected:
+            self._report("作品形式の選択が反映されませんでした。")
+            return False
+
+        # 選択に伴う後続フィールドの再描画を待つ（AI利用欄が出現するまで）。
+        # 出現しない構成でも入力は続行できるよう、待てなくても致命エラーにはしない。
+        for _ in range(10):
+            try:
+                if self.driver.find_elements(By.CSS_SELECTOR, "input[name='ai_generated_type']"):
+                    break
+            except Exception:
+                pass
+            time.sleep(0.5)
+
+        time.sleep(0.5)  # 描画の安定待ち
+        self._report(f"作品形式を選択しました: {article_type}")
+        return True
 
     def step2_select_ai_type(self, ai_type: str):
         """ステップ2: AI利用の有無を選択"""
@@ -635,14 +1100,7 @@ class FanzaFormFiller:
             if not furigana_filled:
                 self._report("ふりがなフィールドが見つかりませんでした")
 
-        # 作品区分（男性向け等）
-        if data.get("section"):
-            if self._click_radio("section", data["section"]):
-                self._report(f"作品区分選択完了: {data['section']}")
-
-        # 年齢指定
-        if data.get("keyword_age"):
-            self._click_radio("keyword_age", data["keyword_age"])
+        # 作品区分・年齢指定は「詳細情報」ステップへ移動した（step_detail_fill で入力）
 
         self._report("基本情報入力完了")
         return True
@@ -682,8 +1140,9 @@ class FanzaFormFiller:
             )
             for i, name in enumerate(parody_names):
                 if name and i < len(parody_inputs):
-                    parody_inputs[i].clear()
-                    parody_inputs[i].send_keys(name)
+                    # send_keys は interactable でないと失敗するため、
+                    # JavaScriptフォールバック付きの共通メソッドで入力する
+                    self._fill_input_element(parody_inputs[i], name)
                     time.sleep(0.2)
         except Exception as e:
             self._report(f"パロディ詳細入力エラー: {e}")
@@ -736,7 +1195,7 @@ class FanzaFormFiller:
 
         # 専売希望
         if data.get("monopoly_hope_flg"):
-            self._click_radio("monopoly_hope_flg", data["monopoly_hope_flg"])
+            self._set_monopoly(data["monopoly_hope_flg"])
 
         # 作品保護
         if data.get("drm_hope"):
@@ -778,9 +1237,7 @@ class FanzaFormFiller:
         if data.get("release_date_type"):
             self._click_radio("release_date_type", data["release_date_type"])
 
-        # 作品修正対応
-        if data.get("revision_flg"):
-            self._click_radio("revision_flg", data["revision_flg"])
+        # 作品修正対応は「ファイル登録」ステップへ移動した（step_files_fill で入力）
 
         # 通信欄
         if data.get("note"):
@@ -791,59 +1248,8 @@ class FanzaFormFiller:
         return True
 
     def fill_form(self, data: dict):
-        """フォームに一括入力（全ステップ実行）"""
-        self._report("=== 自動入力開始 ===")
-
-        # フォームが開いていない状態で入力を始めて「完了」と誤報告しないよう、
-        # 入力開始前に主要素(article_type)の存在を必ず確認する。
-        if not self._form_is_ready():
-            self._report(
-                "フォームが表示されていないため入力を中止しました。\n"
-                "フォームページが開いているか確認してください。"
-            )
-            return False
-
-        try:
-            # ステップ1: 作品形式
-            if not self.step1_select_article_type(data.get("article_type", "cg")):
-                self._report("作品形式の選択に失敗したため入力を中止しました。")
-                return False
-
-            # ステップ2: AI利用の有無
-            if not self.step2_select_ai_type(data.get("ai_generated_type", "2")):
-                return False
-
-            # ステップ3: 基本情報
-            self.step3_fill_basic_info(data)
-
-            # ステップ4: 作品内容
-            self.step4_fill_content_info(data)
-
-            # ステップ5: パロディ情報
-            self.step5_fill_parody_info(data)
-
-            # ステップ6: キーワード
-            self.step6_select_keywords(data.get("keywords", []))
-
-            # ステップ7: 販売情報
-            self.step7_fill_sales_info(data)
-
-            # ステップ8: その他
-            self.step8_fill_other_info(data)
-
-            # 入力完了後、ページ最上部までスクロールして戻す
-            try:
-                self.driver.execute_script("window.scrollTo({top: 0, behavior: 'smooth'});")
-            except Exception:
-                pass
-
-            self._report("=== 自動入力完了 ===")
-            return True
-
-        except Exception as e:
-            self._report(f"エラーが発生しました: {e}")
-            return False
-
+        """フォームに一括入力（4ステップを順に入力）"""
+        return self._fill_all_steps(data)
 
 class FanzaTrailerFormFiller(FanzaFormFiller):
     """FANZA同人 予約作品（予告）フォーム自動入力クラス"""
@@ -853,11 +1259,7 @@ class FanzaTrailerFormFiller(FanzaFormFiller):
     def navigate_to_form(self):
         """予約作品登録フォームページに移動。開けたら True、開けなければ False。"""
         self._report("予約作品フォームページを開いています...")
-        if not self._open_form_in_new_tab():
-            self._report("予約作品フォームページへの遷移に失敗しました。")
-            return False
-
-        if not self._form_is_ready():
+        if not self._open_and_wait_ready():
             try:
                 cur = self.driver.current_url
             except Exception:
@@ -914,7 +1316,7 @@ class FanzaTrailerFormFiller(FanzaFormFiller):
 
         # 専売希望
         if data.get("monopoly_hope_flg"):
-            self._click_radio("monopoly_hope_flg", data["monopoly_hope_flg"])
+            self._set_monopoly(data["monopoly_hope_flg"])
 
         # 作品保護
         if data.get("drm_hope"):
@@ -938,7 +1340,7 @@ class FanzaTrailerFormFiller(FanzaFormFiller):
             try:
                 # 未定チェックボックスを探す
                 checkbox = self.driver.find_element(
-                    By.CSS_SELECTOR, "input[name='release_undecided'], input[name='release_season_undecided'], input[type='checkbox'][id*='release']"
+                    By.CSS_SELECTOR, "input[type='checkbox'][name='release_season'], input[name='release_undecided'], input[name='release_season_undecided'], input[type='checkbox'][id*='release']"
                 )
                 if not checkbox.is_selected():
                     self.driver.execute_script("arguments[0].click();", checkbox)
@@ -951,9 +1353,7 @@ class FanzaTrailerFormFiller(FanzaFormFiller):
                 else:
                     self._report(f"配信予定未定設定エラー: {e}")
 
-        # 作品修正対応
-        if data.get("revision_flg"):
-            self._click_radio("revision_flg", data["revision_flg"])
+        # 作品修正対応は「ファイル登録」ステップへ移動した（step_files_fill で入力）
 
         # 通信欄
         if data.get("note"):
@@ -964,59 +1364,8 @@ class FanzaTrailerFormFiller(FanzaFormFiller):
         return True
 
     def fill_form(self, data: dict):
-        """予約作品フォームに一括入力"""
-        self._report("=== 予約作品自動入力開始 ===")
-
-        # フォームが開いていない状態で入力を始めて「完了」と誤報告しないよう、
-        # 入力開始前に主要素(article_type)の存在を必ず確認する。
-        if not self._form_is_ready():
-            self._report(
-                "予約作品フォームが表示されていないため入力を中止しました。\n"
-                "フォームページが開いているか確認してください。"
-            )
-            return False
-
-        try:
-            # ステップ1: 作品形式
-            if not self.step1_select_article_type(data.get("article_type", "cg")):
-                self._report("作品形式の選択に失敗したため入力を中止しました。")
-                return False
-
-            # ステップ2: AI利用の有無
-            if not self.step2_select_ai_type(data.get("ai_generated_type", "2")):
-                return False
-
-            # ステップ3: 基本情報
-            self.step3_fill_basic_info(data)
-
-            # ステップ4: 作品内容
-            self.step4_fill_content_info(data)
-
-            # ステップ5: パロディ情報
-            self.step5_fill_parody_info(data)
-
-            # ステップ6: キーワード
-            self.step6_select_keywords(data.get("keywords", []))
-
-            # ステップ7: 販売情報（予約作品用）
-            self.step7_fill_sales_info(data)
-
-            # ステップ8: その他（予約作品用）
-            self.step8_fill_other_info(data)
-
-            # 入力完了後、ページ最上部までスクロールして戻す
-            try:
-                self.driver.execute_script("window.scrollTo({top: 0, behavior: 'smooth'});")
-            except Exception:
-                pass
-
-            self._report("=== 予約作品自動入力完了 ===")
-            return True
-
-        except Exception as e:
-            self._report(f"エラーが発生しました: {e}")
-            return False
-
+        """予約作品フォームに一括入力（4ステップを順に入力）"""
+        return self._fill_all_steps(data, "予約作品")
 
 class FanzaFormalRegistrationFiller(FanzaFormFiller):
     """FANZA同人 配信申請（本登録 formal_registration）ページ入力クラス。
@@ -1694,6 +2043,23 @@ class FanzaFormalRegistrationFiller(FanzaFormFiller):
             # タイトル未指定: すでに開いている配信申請ページに入力する
             self._switch_to_formal_registration_tab()
 
+        # 配信申請ページが白い（読み込み中オーバーレイが被った）状態のまま
+        # 入力に進むと、枚数・割引などが React に反映されず貼り付けできない。
+        # ページ読み込み完了と、主要フィールドが実際に操作可能になるのを待つ。
+        self._page_fully_loaded()
+        for sel in (
+            "input[name='file_number']",
+            "input[name='price_retail']",
+            "input[name='pre_release_articles_campaign_flg']",
+            "form",
+        ):
+            try:
+                if self.driver.find_elements(By.CSS_SELECTOR, sel):
+                    self._wait_form_interactable(sel, timeout=15)
+                    break
+            except Exception:
+                continue
+
         self._dump_page()
 
         # ページを開いた直後・入力前に、説明文/タイトルの早期チェックを行う
@@ -1710,6 +2076,14 @@ class FanzaFormalRegistrationFiller(FanzaFormFiller):
                 self._report(f"枚数を入力しました: {file_number}枚")
             else:
                 self._report("枚数の入力欄が見つかりませんでした（要確認）")
+
+        # ステップ形式のページでは、キャンペーン・割引・配信開始日は
+        # 最後の「販売情報・その他」ステップにあるため、そこまで「次へ」で進める。
+        if not self._advance_until(
+            "input[name='pre_release_articles_campaign_flg'], "
+            "input[name='campaign_auto_join_flg_set_days']"
+        ):
+            self._report("販売情報ステップを表示できませんでした（割引等の入力欄が見つからない可能性があります）")
 
         # 1. キャンペーン自動参加: 販売からすぐに自動参加する
         if data.get("campaign_auto_join", True):
