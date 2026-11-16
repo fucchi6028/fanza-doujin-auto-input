@@ -562,6 +562,128 @@ class FanzaFormFiller:
                 self._report(f"作品区分選択完了: {data['section']}")
         return True
 
+    # ===== ゲーム仕様（作品形式=ゲームのときだけ表示される欄） =====
+    # FANZAのフォームJS(dojin.productform.bundle.js)より:
+    #   対応OS Windows … checkbox name="os_type[]" value="10"/"11"
+    #   対応ビット数   … div.os-bits 内の select（name無し）value 0=32・64bit / 1=64bit / 2=32bit
+    #   Mac            … div.game-spec-env-os 内の radio、value "0"=非対応
+    #   スマホブラウザ版ゲーム(β) … radio name="cloudGameHopeFlg" value 1=希望する / 0=希望しない
+    GAME_WIN_OS_SELECTOR = "input[name='os_type[]']"
+
+    def _set_checkbox(self, elem, checked: bool = True) -> bool:
+        for _ in range(3):
+            try:
+                if elem.is_selected() == checked:
+                    return True
+                self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", elem)
+                self.driver.execute_script("arguments[0].click();", elem)
+                time.sleep(0.4)
+            except Exception:
+                time.sleep(0.4)
+        try:
+            return elem.is_selected() == checked
+        except Exception:
+            return False
+
+    def _game_spec_present(self) -> bool:
+        try:
+            return bool(self.driver.find_elements(By.CSS_SELECTOR, self.GAME_WIN_OS_SELECTOR))
+        except Exception:
+            return False
+
+    def step_game_spec_fill(self, data: dict) -> bool:
+        """ゲーム仕様欄を入力する（ゲームジャンル・動作環境は入力しない）。"""
+        spec = data.get("game_spec") or {}
+        self._report("ゲーム仕様を入力中...")
+        ok_all = True
+
+        # 対応OS（Windows）
+        for ver in spec.get("win_os_versions", []):
+            try:
+                cb = self.driver.find_element(
+                    By.CSS_SELECTOR, f"{self.GAME_WIN_OS_SELECTOR}[value='{ver}']")
+                if self._set_checkbox(cb, True):
+                    self._report(f"  対応OS: Windows{ver} にチェック")
+                else:
+                    ok_all = False
+                    self._report(f"  対応OS: Windows{ver} のチェックが反映されませんでした")
+            except Exception as e:
+                ok_all = False
+                self._report(f"  対応OS: Windows{ver} が見つかりません ({e})")
+
+        # 対応ビット数（プルダウン）
+        bits = spec.get("win_os_bits")
+        if bits is not None:
+            try:
+                from selenium.webdriver.support.ui import Select
+                sel = self.driver.find_element(By.CSS_SELECTOR, "div.os-bits select")
+                self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", sel)
+                Select(sel).select_by_value(str(bits))
+                time.sleep(0.4)
+                if sel.get_attribute("value") != str(bits):
+                    # Reactに拾われなかった場合はネイティブsetter＋changeで再設定
+                    self.driver.execute_script("""
+                        var s = arguments[0];
+                        var setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;
+                        setter.call(s, arguments[1]);
+                        s.dispatchEvent(new Event('change', {bubbles: true}));
+                    """, sel, str(bits))
+                    time.sleep(0.4)
+                if sel.get_attribute("value") == str(bits):
+                    self._report("  対応ビット数: 64bit")
+                else:
+                    ok_all = False
+                    self._report("  対応ビット数の選択が反映されませんでした")
+            except Exception as e:
+                ok_all = False
+                self._report(f"  対応ビット数が見つかりません ({e})")
+
+        # Mac（非対応 = value 0）
+        mac = spec.get("mac_os")
+        if mac is not None:
+            try:
+                radio = self.driver.find_element(
+                    By.XPATH,
+                    "//div[contains(@class,'game-spec-env-os')]"
+                    "[.//div[contains(@class,'os-name') and contains(normalize-space(.),'Mac')]]"
+                    f"//input[@type='radio' and @value='{mac}']")
+                done = False
+                for _ in range(3):
+                    self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", radio)
+                    self.driver.execute_script("arguments[0].click();", radio)
+                    time.sleep(0.4)
+                    if radio.is_selected():
+                        done = True
+                        break
+                if done:
+                    self._report("  Mac: 非対応")
+                else:
+                    ok_all = False
+                    self._report("  Mac: 非対応の選択が反映されませんでした")
+            except Exception as e:
+                ok_all = False
+                self._report(f"  Mac の選択肢が見つかりません ({e})")
+
+        return ok_all
+
+    def _try_game_spec(self, data: dict, state: dict):
+        """表示中のステップにゲーム仕様欄があれば入力する（各ステップで呼ぶ）。
+
+        対応OS欄とスマホブラウザ版ゲーム(β)欄は別ステップにある可能性があるため、
+        それぞれ見つかったステップで1回だけ入力する。
+        """
+        spec = data.get("game_spec")
+        if not spec:
+            return
+        if not state.get("os_done") and self._game_spec_present():
+            self.step_game_spec_fill(data)
+            state["os_done"] = True
+        if (not state.get("cloud_done") and spec.get("cloud_game_hope") is not None
+                and self.driver.find_elements(By.CSS_SELECTOR, "input[name='cloudGameHopeFlg']")):
+            if self._click_radio("cloudGameHopeFlg", str(spec["cloud_game_hope"])):
+                self._report("  スマホブラウザ版ゲーム(β): 希望しない")
+            state["cloud_done"] = True
+
     def _fill_all_steps(self, data: dict, kind: str = "") -> bool:
         """4ステップのフォームを順に入力する（配信作品・予告作品共通）。"""
         self._report(f"=== {kind}自動入力開始 ===")
@@ -578,6 +700,7 @@ class FanzaFormFiller:
             )
             return False
 
+        game_state = {}  # ゲーム仕様の入力済みフラグ（ゲーム出品のときのみ使う）
         try:
             # ---- 1. 基本情報 ----
             if not self._go_to_step(0):
@@ -589,11 +712,13 @@ class FanzaFormFiller:
                 return False
             self.step3_fill_basic_info(data)
             self.step4_fill_content_info(data)
+            self._try_game_spec(data, game_state)
 
             # ---- 2. ファイル登録 ----
             if not self._go_to_step(1):
                 return False
             self.step_files_fill(data)
+            self._try_game_spec(data, game_state)
 
             # ---- 3. 詳細情報 ----
             if not self._go_to_step(2):
@@ -601,12 +726,24 @@ class FanzaFormFiller:
             self.step_detail_fill(data)
             self.step5_fill_parody_info(data)
             self.step6_select_keywords(data.get("keywords", []))
+            self._try_game_spec(data, game_state)
 
             # ---- 4. 販売情報・その他 ----
             if not self._go_to_step(3):
                 return False
             self.step7_fill_sales_info(data)
             self.step8_fill_other_info(data)
+            self._try_game_spec(data, game_state)
+
+            if data.get("game_spec"):
+                missing = []
+                if not game_state.get("os_done"):
+                    missing.append("対応OS・ビット数・Mac")
+                if data["game_spec"].get("cloud_game_hope") is not None and not game_state.get("cloud_done"):
+                    missing.append("スマホブラウザ版ゲーム(β)")
+                self.game_spec_missing = missing  # 完了ダイアログで知らせる
+                if missing:
+                    self._report("ゲーム仕様の欄が見つからず未入力: " + "・".join(missing) + "（手動で設定してください）")
 
             # ファイル（作品本体・画像）は手動登録のため、ファイル登録ステップを表示して終える
             self._go_to_step(1)

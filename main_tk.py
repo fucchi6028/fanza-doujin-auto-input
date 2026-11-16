@@ -40,6 +40,7 @@ from management.db import (
     normalize_account, account_sort_key,
 )
 from management import excel_export
+from utils import game_release
 
 # 定数定義
 
@@ -84,6 +85,18 @@ DRM_OPTIONS = [
     ("protect", "プロテクトサービス"),
     ("sdrm", "ソーシャルDRM (β版)"),
 ]
+
+# ゲーム出品タブの固定値
+GAME_PRICE = "500"            # 販売価格（円・税抜）
+GAME_PARODY_TYPE = "2"        # 漫画・アニメパロディ
+# ゲーム仕様: Windows10/11・64bit・Mac非対応・スマホブラウザ版ゲーム(β)は希望しない
+# （ゲームジャンルは手動で選択、動作環境は入力しない）
+GAME_SPEC = {
+    "win_os_versions": ["10", "11"],
+    "win_os_bits": 1,          # 0=32・64bit / 1=64bit / 2=32bit
+    "mac_os": "0",             # 0=非対応
+    "cloud_game_hope": 0,      # 1=希望する / 0=希望しない
+}
 
 
 def mask_second_char(text: str) -> str:
@@ -291,6 +304,22 @@ class FanzaAutoInputApp:
         self.formal_release_date_type_var = tk.StringVar(value="1")  # 配信開始日指定（デフォルト: 最短で公開）
         self.formal_current_profile_id = None
 
+        # ゲーム出品用UI変数
+        self.game_release_dir_var = tk.StringVar(value=game_release.load_release_dir())
+        self.game_title_var = tk.StringVar()
+        self.game_title_ruby_var = tk.StringVar()
+        self.game_price_var = tk.StringVar(value=GAME_PRICE)
+        self.game_monopoly_var = tk.BooleanVar(value=False)
+        self.game_campaign_var = tk.BooleanVar(value=True)
+        self.game_coupon_var = tk.BooleanVar(value=True)
+        self.game_discount_enabled_var = tk.BooleanVar(value=True)
+        self.game_release_date_type_var = tk.StringVar(value="1")
+        self.game_current_profile_id = None
+        self.game_products = []          # 作品フォルダ(Path)のリスト
+        self.game_info = None            # load_game_product の結果
+        self.game_selected_keywords = []
+        self.game_keyword_buttons = {}
+
         self.create_ui()
         self.load_initial_data()
 
@@ -479,6 +508,11 @@ class FanzaAutoInputApp:
         self.trailer_frame = ttk.Frame(self.notebook)
         self.notebook.add(self.trailer_frame, text="予約作品入力")
         self.create_trailer_input_tab()
+
+        # ゲーム出品タブ
+        self.game_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.game_frame, text="ゲーム出品")
+        self.create_game_input_tab()
 
         # 配信申請タブ
         self.formal_frame = ttk.Frame(self.notebook)
@@ -1473,6 +1507,436 @@ class FanzaAutoInputApp:
 
         threading.Thread(target=run, daemon=True).start()
 
+    # ===== ゲーム出品タブ =====
+    def create_game_input_tab(self):
+        """ゲーム出品タブ: リリースフォルダの商品登録用テキスト・ゲーム説明文から自動反映する"""
+        c = self.COLORS
+        canvas = tk.Canvas(self.game_frame, bg=c["bg"], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self.game_frame, orient="vertical", command=canvas.yview)
+        sf = ttk.Frame(canvas)
+        sf.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=sf, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        def on_mousewheel(event):
+            if isinstance(event.widget, tk.Text):
+                return
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def bind_mousewheel(widget):
+            if not isinstance(widget, tk.Text):
+                widget.bind("<MouseWheel>", on_mousewheel)
+            for child in widget.winfo_children():
+                bind_mousewheel(child)
+
+        canvas.bind("<MouseWheel>", on_mousewheel)
+        sf.bind("<Map>", lambda e: bind_mousewheel(sf))
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # === 作品選択 ===
+        select_frame = ttk.LabelFrame(sf, text="ゲーム作品選択", padding=10)
+        select_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        ttk.Label(select_frame, text="リリースフォルダ:").grid(row=0, column=0, sticky=tk.W, padx=5)
+        ttk.Entry(select_frame, textvariable=self.game_release_dir_var, width=60, state="readonly").grid(
+            row=0, column=1, columnspan=2, sticky=tk.W, padx=5, pady=2)
+        ttk.Button(select_frame, text="変更", command=self.browse_game_release_dir).grid(row=0, column=3, sticky=tk.W, padx=5)
+
+        ttk.Label(select_frame, text="プロファイル:").grid(row=1, column=0, sticky=tk.W, padx=5)
+        self.game_profile_combo = ttk.Combobox(select_frame, width=25, state="readonly")
+        self.game_profile_combo.grid(row=1, column=1, sticky=tk.W, padx=5, pady=2)
+        self.game_profile_combo.bind("<<ComboboxSelected>>", self.on_game_profile_change)
+
+        ttk.Label(select_frame, text="作品フォルダ:").grid(row=1, column=2, sticky=tk.W, padx=5)
+        self.game_product_combo = ttk.Combobox(select_frame, width=45, state="readonly")
+        self.game_product_combo.grid(row=1, column=3, sticky=tk.W, padx=5, pady=2)
+        self.game_product_combo.bind("<<ComboboxSelected>>", lambda e: self.load_game_product_data())
+
+        btn_frame = ttk.Frame(select_frame)
+        btn_frame.grid(row=2, column=0, columnspan=4, pady=10)
+        ttk.Button(btn_frame, text="ゲーム出品入力開始", command=self.start_game_auto_input,
+                   style="Accent.TButton").pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="再読み込み", command=self.load_game_product_data).pack(side=tk.LEFT, padx=5)
+
+        # === 基本設定 ===
+        basic_frame = ttk.LabelFrame(sf, text="基本設定（作品形式: ゲーム / AI利用: AIで作品を生成している / 男性向け / 成人向け）", padding=10)
+        basic_frame.pack(fill=tk.X, padx=5, pady=5)
+        ttk.Label(basic_frame, text="ゲーム仕様（自動）: Windows10・11 / 64bit / Mac非対応 / スマホブラウザ版(β) 希望しない"
+                                    "　※ゲームジャンルは手動、動作環境は入力しない",
+                  foreground=c["warning"]).grid(row=2, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(4, 0))
+        ttk.Label(basic_frame, text="タイトル:").grid(row=0, column=0, sticky=tk.W, padx=5)
+        ttk.Entry(basic_frame, textvariable=self.game_title_var, width=70).grid(row=0, column=1, sticky=tk.W, padx=5, pady=2)
+        ttk.Label(basic_frame, text="ふりがな:").grid(row=1, column=0, sticky=tk.W, padx=5)
+        ttk.Entry(basic_frame, textvariable=self.game_title_ruby_var, width=70).grid(row=1, column=1, sticky=tk.W, padx=5, pady=2)
+
+        # === 作品内容 ===
+        content_frame = ttk.LabelFrame(sf, text="作品内容", padding=10)
+        content_frame.pack(fill=tk.X, padx=5, pady=5)
+        ttk.Label(content_frame, text="説明文:").grid(row=0, column=0, sticky=tk.NW, padx=5)
+        comment_frame = ttk.Frame(content_frame)
+        comment_frame.grid(row=0, column=1, padx=5, pady=2, sticky=tk.W)
+        comment_scrollbar = ttk.Scrollbar(comment_frame)
+        comment_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.game_comment_text = tk.Text(
+            comment_frame, width=80, height=16, yscrollcommand=comment_scrollbar.set,
+            bg=c["entry_bg"], fg=c["entry_fg"], insertbackground=c["fg"],
+            selectbackground=c["accent"], selectforeground="#ffffff",
+            font=("Meiryo UI", 10), relief=tk.FLAT, padx=8, pady=8)
+        self.game_comment_text.pack(side=tk.LEFT, fill=tk.BOTH)
+        comment_scrollbar.config(command=self.game_comment_text.yview)
+
+        def on_comment_mousewheel(event):
+            self.game_comment_text.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            return "break"
+        self.game_comment_text.bind("<MouseWheel>", on_comment_mousewheel)
+        self.game_comment_len_label = ttk.Label(content_frame, text="")
+        self.game_comment_len_label.grid(row=1, column=1, sticky=tk.W, padx=5)
+        self.game_comment_text.bind("<<Modified>>", self._on_game_comment_modified)
+
+        # === パロディ設定 ===
+        parody_frame = ttk.LabelFrame(sf, text="パロディ設定（漫画・アニメパロディ固定 / 詳細1〜4=キャラクター名）", padding=10)
+        parody_frame.pack(fill=tk.X, padx=5, pady=5)
+        self.game_parody_entries = []
+        for i in range(4):
+            ttk.Label(parody_frame, text=f"詳細{i+1}:").grid(row=0, column=i * 2, sticky=tk.W, padx=5)
+            entry = ttk.Entry(parody_frame, width=22)
+            entry.grid(row=0, column=i * 2 + 1, sticky=tk.W, padx=2, pady=2)
+            self.game_parody_entries.append(entry)
+        self.game_chars_label = ttk.Label(parody_frame, text="", foreground=c["fg_secondary"])
+        self.game_chars_label.grid(row=1, column=0, columnspan=8, sticky=tk.W, padx=5, pady=(4, 0))
+
+        # === キーワード ===
+        keyword_frame = ttk.LabelFrame(sf, text="キーワード（最大10個）", padding=10)
+        keyword_frame.pack(fill=tk.X, padx=5, pady=5)
+        kw_status = ttk.Frame(keyword_frame)
+        kw_status.pack(fill=tk.X, pady=5)
+        self.game_keyword_label = ttk.Label(kw_status, text="選択中: 0/10")
+        self.game_keyword_label.pack(side=tk.LEFT)
+        ttk.Button(kw_status, text="キーワード保存", command=self.save_game_keywords_to_storage,
+                   style="Success.TButton").pack(side=tk.RIGHT, padx=5)
+        ttk.Button(kw_status, text="クリア", command=self.clear_game_keywords).pack(side=tk.RIGHT, padx=5)
+        self.game_keyword_display = ttk.Label(keyword_frame, text="(なし)", wraplength=900, foreground=c["success"])
+        self.game_keyword_display.pack(anchor=tk.W, pady=5)
+        kw_notebook = ttk.Notebook(keyword_frame)
+        kw_notebook.pack(fill=tk.BOTH, expand=True, pady=5)
+        popular_tab = ttk.Frame(kw_notebook)
+        kw_notebook.add(popular_tab, text="人気")
+        self._create_game_keyword_buttons(popular_tab, [(kid, name) for kid, name in POPULAR_KEYWORDS])
+        for cat_id, cat_name in KEYWORD_CATEGORIES:
+            tab = ttk.Frame(kw_notebook)
+            kw_notebook.add(tab, text=cat_name[:6])
+            self._create_game_keyword_buttons(tab, KEYWORDS_BY_CATEGORY.get(cat_id, []))
+
+        # === 販売情報 ===
+        sales_frame = ttk.LabelFrame(sf, text="販売情報", padding=10)
+        sales_frame.pack(fill=tk.X, padx=5, pady=5)
+        ttk.Label(sales_frame, text="販売価格:").grid(row=0, column=0, sticky=tk.W, padx=5)
+        ttk.Entry(sales_frame, textvariable=self.game_price_var, width=15, state="readonly").grid(
+            row=0, column=1, sticky=tk.W, padx=5, pady=2)
+        ttk.Label(sales_frame, text="円（税抜・固定）").grid(row=0, column=2, sticky=tk.W)
+        ttk.Checkbutton(sales_frame, text="専売希望", variable=self.game_monopoly_var).grid(row=0, column=3, padx=20)
+
+        ttk.Label(sales_frame, text="作品保護:").grid(row=1, column=0, sticky=tk.W, padx=5)
+        self.game_drm_combo = ttk.Combobox(sales_frame, width=20, state="readonly")
+        self.game_drm_combo['values'] = [v for k, v in DRM_OPTIONS]
+        self.game_drm_combo.current(0)
+        self.game_drm_combo.grid(row=1, column=1, sticky=tk.W, padx=5, pady=2)
+        ttk.Checkbutton(sales_frame, text="キャンペーン参加", variable=self.game_campaign_var).grid(row=1, column=3, padx=20)
+        ttk.Checkbutton(sales_frame, text="クーポン参加", variable=self.game_coupon_var).grid(row=1, column=4, padx=20)
+
+        ttk.Label(sales_frame, text="自動参加:").grid(row=2, column=0, sticky=tk.W, padx=5)
+        ttk.Label(sales_frame, text="発売からすぐに自動参加する").grid(row=2, column=1, columnspan=2, sticky=tk.W, padx=5, pady=2)
+
+        ttk.Label(sales_frame, text="割引設定:").grid(row=3, column=0, sticky=tk.W, padx=5)
+        ttk.Checkbutton(sales_frame, text="設定する", variable=self.game_discount_enabled_var).grid(row=3, column=1, sticky=tk.W, padx=5)
+        discount_detail = ttk.Frame(sales_frame)
+        discount_detail.grid(row=3, column=2, columnspan=3, sticky=tk.W, padx=5)
+        ttk.Label(discount_detail, text="実施期間:").pack(side=tk.LEFT)
+        self.game_discount_days_combo = ttk.Combobox(discount_detail, width=5, state="readonly")
+        self.game_discount_days_combo['values'] = [str(i) for i in range(1, 29)]
+        self.game_discount_days_combo.current(27)  # 28日
+        self.game_discount_days_combo.pack(side=tk.LEFT, padx=2)
+        ttk.Label(discount_detail, text="日").pack(side=tk.LEFT, padx=(0, 15))
+        ttk.Label(discount_detail, text="割引率:").pack(side=tk.LEFT)
+        self.game_discount_rate_combo = ttk.Combobox(discount_detail, width=5, state="readonly")
+        self.game_discount_rate_combo['values'] = [str(r) for r in range(10, 100, 5)]
+        self.game_discount_rate_combo.current(14)  # 80%
+        self.game_discount_rate_combo.pack(side=tk.LEFT, padx=2)
+        ttk.Label(discount_detail, text="%").pack(side=tk.LEFT)
+
+        ttk.Label(sales_frame, text="配信開始:").grid(row=4, column=0, sticky=tk.W, padx=5)
+        release_frame = ttk.Frame(sales_frame)
+        release_frame.grid(row=4, column=1, columnspan=4, sticky=tk.W, padx=5, pady=2)
+        ttk.Radiobutton(release_frame, text="最短で公開", variable=self.game_release_date_type_var, value="1").pack(side=tk.LEFT)
+        ttk.Radiobutton(release_frame, text="日付を指定して公開", variable=self.game_release_date_type_var, value="2").pack(side=tk.LEFT, padx=10)
+
+        # === 通信欄 ===
+        note_frame = ttk.LabelFrame(sf, text="通信欄", padding=10)
+        note_frame.pack(fill=tk.X, padx=5, pady=5)
+        self.game_note_text = tk.Text(
+            note_frame, width=80, height=3, bg=c["entry_bg"], fg=c["entry_fg"],
+            insertbackground=c["fg"], selectbackground=c["accent"], selectforeground="#ffffff",
+            font=("Meiryo UI", 10), relief=tk.FLAT, padx=8, pady=8)
+        self.game_note_text.pack(padx=5, pady=2)
+
+    def _create_game_keyword_buttons(self, parent, keywords):
+        """ゲーム出品用キーワードボタン（スクロール対応）"""
+        c = self.COLORS
+        canvas = tk.Canvas(parent, height=180, bg=c["bg"], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        btn_frame = ttk.Frame(canvas)
+        btn_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=btn_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        def on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            return "break"
+
+        canvas.bind("<MouseWheel>", on_mousewheel)
+        btn_frame.bind("<MouseWheel>", on_mousewheel)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        cols = 7
+        for i, item in enumerate(keywords):
+            kid, name = item[0], item[1]
+            display_name = name[:8] + ".." if len(name) > 8 else name
+            btn = ttk.Button(btn_frame, text=display_name, width=10, style="Keyword.TButton",
+                             command=lambda k=kid: self.toggle_game_keyword(k))
+            btn.grid(row=i // cols, column=i % cols, padx=1, pady=1, sticky="w")
+            self.game_keyword_buttons.setdefault(kid, []).append(btn)
+            btn.bind("<MouseWheel>", on_mousewheel)
+
+    def toggle_game_keyword(self, keyword_id):
+        if keyword_id in self.game_selected_keywords:
+            self.game_selected_keywords.remove(keyword_id)
+        elif len(self.game_selected_keywords) < 10:
+            self.game_selected_keywords.append(keyword_id)
+        self.update_game_keyword_display()
+
+    def clear_game_keywords(self):
+        self.game_selected_keywords.clear()
+        self.update_game_keyword_display()
+
+    def update_game_keyword_display(self):
+        names = [get_keyword_name(k) for k in self.game_selected_keywords]
+        self.game_keyword_display.config(text=", ".join(names) if names else "(なし)")
+        self.game_keyword_label.config(text=f"選択中: {len(self.game_selected_keywords)}/10")
+        for kid, btn_list in self.game_keyword_buttons.items():
+            style = "Selected.TButton" if kid in self.game_selected_keywords else "Keyword.TButton"
+            for btn in btn_list:
+                btn.configure(style=style)
+
+    def _game_keyword_key(self):
+        """キーワード保存用のキー（通常作品のシリーズと混ざらないよう接頭辞を付ける）"""
+        if not self.game_info or not self.game_info.get("series"):
+            return None
+        return f"[ゲーム]{self.game_info['series']}"
+
+    def save_game_keywords_to_storage(self):
+        if not self.game_current_profile_id:
+            messagebox.showwarning("警告", "プロファイルを選択してください")
+            return
+        key = self._game_keyword_key()
+        if not key:
+            messagebox.showwarning("警告", "作品フォルダを選択してください")
+            return
+        self.keyword_storage.save_keywords_by_profile_series(
+            self.game_current_profile_id, key, self.game_selected_keywords.copy())
+        messagebox.showinfo("保存完了", f"キーワードを保存しました\nシリーズ: {self.game_info['series']}")
+
+    def _on_game_comment_modified(self, event=None):
+        n = len(self.game_comment_text.get("1.0", tk.END).strip())
+        self.game_comment_len_label.config(text=f"{n}文字")
+        self.game_comment_text.edit_modified(False)
+
+    def browse_game_release_dir(self):
+        path = filedialog.askdirectory(
+            title="ゲームのリリースフォルダを選択（直下に FANZA-001 などが並ぶフォルダ）",
+            initialdir=self.game_release_dir_var.get() or "")
+        if not path:
+            return
+        self.game_release_dir_var.set(path)
+        game_release.save_release_dir(path)
+        if self.game_profile_combo.current() >= 0:
+            self.on_game_profile_change(None)
+
+    def on_game_profile_change(self, event):
+        idx = self.game_profile_combo.current()
+        if idx < 0:
+            return
+        profile = self.profile_manager.profiles[idx]
+        self.game_current_profile_id = profile.profile_id
+        self.game_product_combo.set('')
+        self.game_product_combo['values'] = []
+        self.game_products = []
+        self.game_info = None
+
+        account_folder = game_release.find_account_folder(self.game_release_dir_var.get(), profile.profile_name)
+        if not account_folder:
+            self.status_var.set(f"リリースフォルダに {profile.profile_name} が見つかりません")
+            messagebox.showwarning(
+                "フォルダなし",
+                f"リリースフォルダ内に「{profile.profile_name}」のフォルダが見つかりません。\n"
+                f"{self.game_release_dir_var.get()}")
+            return
+        self.game_products = game_release.list_products(account_folder)
+        if not self.game_products:
+            messagebox.showwarning("作品なし", f"{account_folder} に商品登録用テキストのある作品フォルダがありません。")
+            return
+        self.game_product_combo['values'] = [p.name for p in self.game_products]
+        self.game_product_combo.current(0)
+        self.load_game_product_data()
+
+    def load_game_product_data(self):
+        idx = self.game_product_combo.current()
+        if idx < 0 or idx >= len(self.game_products):
+            return
+        folder = self.game_products[idx]
+        info = game_release.load_game_product(folder)
+        self.game_info = info
+
+        self.game_title_var.set(info["title"])
+
+        # ふりがな: 商品登録用テキストのふりがな＋シリーズ名（伏せ字無し）の読み
+        ruby = info["title_ruby"]
+        if info["series"]:
+            ok, series_ruby = self.furigana_converter.convert(info["series"])
+            if ok:
+                ruby = f"{ruby}{series_ruby}"
+        # FANZAはひらがな・「ー」のみ受け付けるため、実際に入る形で表示する
+        from utils.furigana import sanitize_ruby
+        self.game_title_ruby_var.set(sanitize_ruby(ruby))
+
+        self.game_comment_text.delete("1.0", tk.END)
+        self.game_comment_text.insert("1.0", info["comment"])
+        self._on_game_comment_modified()
+
+        chars = info["characters"]
+        for i, entry in enumerate(self.game_parody_entries):
+            entry.delete(0, tk.END)
+            if i < len(chars):
+                entry.insert(0, chars[i])
+        extra = chars[len(self.game_parody_entries):]
+        self.game_chars_label.config(
+            text=f"キャラクター {len(chars)}人" + (f"（入力しない: {'、'.join(extra)}）" if extra else ""))
+
+        # キーワード（保存済みがあれば読み込み）
+        saved = []
+        key = self._game_keyword_key()
+        if self.game_current_profile_id and key:
+            saved = self.keyword_storage.get_keywords_by_profile_series(self.game_current_profile_id, key) or []
+        self.game_selected_keywords = list(saved)
+        self.update_game_keyword_display()
+
+        if info["errors"]:
+            self.status_var.set("ゲーム作品読み込み（一部取得できず）: " + " / ".join(info["errors"]))
+            messagebox.showwarning("取得できない項目があります", "\n".join(info["errors"]))
+        else:
+            self.status_var.set(f"ゲーム作品読み込み完了: {folder}")
+
+    def get_game_data(self):
+        """ゲーム出品フォームへ渡すデータ"""
+        data = ProductData().data
+        data.update({
+            "title": self.game_title_var.get().strip(),
+            "title_ruby": self.game_title_ruby_var.get().strip(),
+            "article_type": "game",
+            "ai_generated_type": "2",
+            "section": "1",
+            "keyword_age": "156023",
+            "comment": self.game_comment_text.get("1.0", tk.END).strip(),
+            "file_number": "",
+            "keywords": self.game_selected_keywords.copy(),
+            "parody_type": GAME_PARODY_TYPE,
+            "parody_names": [e.get().strip() for e in self.game_parody_entries],
+            "price_retail": GAME_PRICE,
+            "monopoly_hope_flg": "1" if self.game_monopoly_var.get() else "0",
+            "drm_hope": self.get_combo_key(DRM_OPTIONS, self.game_drm_combo.current()),
+            "campaign_kibou_flg": self.game_campaign_var.get(),
+            "is_coupon_usable": self.game_coupon_var.get(),
+            "campaign_auto_join_flg_set_days": "0",
+            "pre_release_articles_campaign_flg": "1" if self.game_discount_enabled_var.get() else "0",
+            "pre_release_articles_campaign_discount_days": self.game_discount_days_combo.get(),
+            "pre_release_articles_campaign_discount_rate": self.game_discount_rate_combo.get(),
+            "release_date_type": self.game_release_date_type_var.get(),
+            "note": self.game_note_text.get("1.0", tk.END).strip(),
+            # ゲーム仕様（ゲームジャンルは手動選択、動作環境は入力しない）
+            "game_spec": dict(GAME_SPEC),
+        })
+        return data
+
+    def start_game_auto_input(self):
+        if not self.game_current_profile_id:
+            messagebox.showwarning("警告", "プロファイルを選択してください")
+            return
+        if not self.game_info:
+            messagebox.showwarning("警告", "作品フォルダを選択してください")
+            return
+        data = self.get_game_data()
+        if not data["title"] or not data["comment"]:
+            messagebox.showwarning("警告", "タイトルまたは説明文が空です")
+            return
+
+        acct = self._account_code_for(self.game_current_profile_id)
+        if not self._confirm_no_duplicate(acct, data["title"], TABLE_LISTING):
+            return
+
+        profile_id = self.game_current_profile_id
+
+        def run():
+            try:
+                self.status_var.set("ブラウザを起動中...")
+                from browser.form_filler import FanzaFormFiller
+
+                browser = self._make_browser(profile_id)
+                if not browser.start(profile_id):
+                    self.status_var.set("ブラウザ起動失敗")
+                    messagebox.showerror(
+                        "エラー",
+                        "ブラウザの起動に失敗しました。\n\n"
+                        f"詳細: {browser.last_error}\n\n"
+                        "AdsPowerが起動しているか、対象プロファイルのブラウザが\n"
+                        "開けるか確認してください。")
+                    return
+
+                self.status_var.set("ゲーム出品フォーム入力中...")
+                filler = FanzaFormFiller(browser.get_driver(), callback=lambda m: self.status_var.set(m))
+                if not filler.navigate_to_form():
+                    self.status_var.set("フォームが開けませんでした")
+                    messagebox.showerror(
+                        "エラー",
+                        "フォームページが開けなかったため、自動入力を中止しました。\n\n"
+                        "・FANZA同人にログインしているか\n"
+                        "・前回の入力確認ダイアログがブラウザに残っていないか\n"
+                        "を確認してから再実行してください。")
+                    return
+                if not filler.fill_form(data):
+                    self.status_var.set("自動入力に失敗しました")
+                    messagebox.showerror(
+                        "エラー",
+                        "ゲーム出品の自動入力に失敗しました。\n"
+                        "ブラウザのフォーム状態を確認してから再実行してください。")
+                    return
+
+                self.status_var.set("完了！ブラウザで確認してください")
+                missing = getattr(filler, "game_spec_missing", [])
+                msg = ("ゲーム出品の自動入力が完了しました。\n"
+                       "ゲームジャンルを選択し、ブラウザで内容を確認してください。")
+                if missing:
+                    msg += ("\n\n※次のゲーム仕様欄が見つからず未入力です。手動で設定してください:\n・"
+                            + "\n・".join(missing))
+                    messagebox.showwarning("完了（一部未入力）", msg)
+                else:
+                    messagebox.showinfo("完了", msg)
+            except Exception as e:
+                self.status_var.set(f"エラー: {e}")
+                messagebox.showerror("エラー", str(e))
+
+        threading.Thread(target=run, daemon=True).start()
+
     def create_formal_registration_tab(self):
         """配信申請タブを作成"""
         c = self.COLORS
@@ -2114,6 +2578,7 @@ class FanzaAutoInputApp:
         self.profile_combo['values'] = [p.profile_name for p in profiles]
         self.trailer_profile_combo['values'] = [p.profile_name for p in profiles]
         self.formal_profile_combo['values'] = [p.profile_name for p in profiles]
+        self.game_profile_combo['values'] = [p.profile_name for p in profiles]
 
         # 登録済みプロファイルをリストに表示
         self.refresh_registered_list()
@@ -2165,6 +2630,7 @@ class FanzaAutoInputApp:
                 self.profile_combo['values'] = profile_names
                 self.trailer_profile_combo['values'] = profile_names
                 self.formal_profile_combo['values'] = profile_names
+                self.game_profile_combo['values'] = profile_names
                 self.refresh_registered_list()
         except Exception as e:
             print(f"[profile] reconcile skipped: {e}")
