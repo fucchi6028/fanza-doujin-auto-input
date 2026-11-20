@@ -6,8 +6,12 @@ DMM/FANZA の Cookie 肥大化対策
 ログイン Cookie まで消えるため再ログインが必要になり、不審アクセス扱い
 （パスワード変更要求）の原因になる。
 
+実測（2026-11, FANZA-015〜023）では DMM の Cookie が合計約10KBあり、その半分は
+同人サイト（Laravel）が発行する「40文字ランダム名・値が eyJ で始まる暗号化Cookie」
+（1個700〜900バイト、フォームを開くたびに増える）だった。広告・計測系は750B程度。
+
 そこでブラウザ接続直後に DMM ドメインの Cookie 量を確認し、上限に近ければ
-広告・計測系の Cookie だけを削除する（ログイン関連は触らない）。
+このランダム名Cookieと広告・計測系だけを削除する（ログイン関連は名前指定で必ず残す）。
 削除後もまだ大きい場合は、原因特定のため大きい Cookie の名前とサイズ
 （値は記録しない）を logs/cookie_guard.log に残す。
 """
@@ -23,6 +27,16 @@ TARGET_DOMAINS = ("dmm.co.jp", "dmm.com")
 # この合計サイズ（バイト）を超えたら掃除する。
 # 一般的なサーバーのヘッダ上限は 8KB 程度なので余裕をもって手前で掃除する。
 CLEAN_THRESHOLD = 4000
+# 掃除後もこれを超えていたらログに警告を残す
+WARN_THRESHOLD = 6000
+
+# ログイン・セッション関連（絶対に削除しない）
+PROTECTED_NAMES = {
+    "INT_SESID", "INT_SESID_SECURE", "secid", "login_secure_id", "login_session_id",
+    "laravel_session", "XSRF-TOKEN", "ec_session", "althash", "has_althash",
+    "check_done_login", "latestlogin", "connect.sid", "age_check_done", "ckcy",
+    "deviceIdentify", "cdp_id", "cds_deliver_id",
+}
 
 # 広告・計測系 Cookie（削除してもログインには影響しない）
 TRACKING_PATTERNS = [
@@ -37,6 +51,21 @@ TRACKING_PATTERNS = [
     r"^krt\.", r"^_kr", r"^_sp_", r"^_hj", r"^mbox", r"^s_",
 ]
 _TRACKING_RE = re.compile("|".join(TRACKING_PATTERNS))
+
+
+_RANDOM_STATE_RE = re.compile(r"[A-Za-z0-9]{40}")
+
+
+def _is_removable(c: dict) -> bool:
+    """削除してよい Cookie か（ログイン関連は除外）"""
+    name = c.get("name", "")
+    if (name in PROTECTED_NAMES or name.startswith(("host-app_state", "__Host-", "__Secure-"))
+            or name.startswith("login") or "SESID" in name):
+        return False
+    # 同人サイトの暗号化フォーム状態Cookie（40文字ランダム名・値は base64 JSON）
+    if _RANDOM_STATE_RE.fullmatch(name) and c.get("value", "").startswith("eyJ"):
+        return True
+    return bool(_TRACKING_RE.search(name))
 
 
 def _is_target(domain: str) -> bool:
@@ -61,7 +90,7 @@ def _log(lines: list[str]):
 
 
 def clean_dmm_cookies(driver, profile_id: str = "", threshold: int = CLEAN_THRESHOLD) -> str:
-    """DMM の Cookie が多すぎれば広告・計測系だけ削除する。結果メッセージを返す。"""
+    """DMM の Cookie が多すぎればフォーム状態Cookieと広告・計測系だけ削除する。結果メッセージを返す。"""
     try:
         cookies = driver.execute_cdp_cmd("Network.getAllCookies", {}).get("cookies", [])
     except Exception as e:
@@ -74,7 +103,7 @@ def clean_dmm_cookies(driver, profile_id: str = "", threshold: int = CLEAN_THRES
 
     removed, removed_bytes = 0, 0
     for c in dmm:
-        if not _TRACKING_RE.search(c.get("name", "")):
+        if not _is_removable(c):
             continue
         try:
             driver.execute_cdp_cmd("Network.deleteCookies", {
@@ -87,11 +116,11 @@ def clean_dmm_cookies(driver, profile_id: str = "", threshold: int = CLEAN_THRES
 
     after = total - removed_bytes
     msg = (f"Cookie掃除: {profile_id} DMM {len(dmm)}個 {total}バイト → "
-           f"広告・計測系 {removed}個 削除 → {after}バイト")
+           f"不要Cookie {removed}個 削除 → {after}バイト")
     lines = [msg]
-    if after > threshold:
+    if after > WARN_THRESHOLD:
         # まだ大きい: 原因特定用に大きい Cookie の名前とサイズを記録（値は残さない）
-        rest = sorted((c for c in dmm if not _TRACKING_RE.search(c.get("name", ""))),
+        rest = sorted((c for c in dmm if not _is_removable(c)),
                       key=_size, reverse=True)[:15]
         lines.append("  まだ大きい。残りの大きいCookie: " + ", ".join(
             f"{c['name']}@{c['domain']}={_size(c)}" for c in rest))
