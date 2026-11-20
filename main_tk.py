@@ -1615,6 +1615,7 @@ class FanzaAutoInputApp:
         self.game_keyword_label.pack(side=tk.LEFT)
         ttk.Button(kw_status, text="キーワード保存", command=self.save_game_keywords_to_storage,
                    style="Success.TButton").pack(side=tk.RIGHT, padx=5)
+        ttk.Button(kw_status, text="ページから取得", command=self.fetch_game_keywords_from_page).pack(side=tk.RIGHT, padx=5)
         ttk.Button(kw_status, text="クリア", command=self.clear_game_keywords).pack(side=tk.RIGHT, padx=5)
         self.game_keyword_display = ttk.Label(keyword_frame, text="(なし)", wraplength=900, foreground=c["success"])
         self.game_keyword_display.pack(anchor=tk.W, pady=5)
@@ -3000,7 +3001,7 @@ class FanzaAutoInputApp:
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _fetch_keywords_from_page(self, profile_id, is_trailer: bool):
+    def _fetch_keywords_from_page(self, profile_id, target: str):
         """開いているブラウザページからジャンルを読み取ってキーワードを取得（共通処理）"""
         if not profile_id:
             messagebox.showwarning("警告", "プロファイルを選択してください")
@@ -3031,17 +3032,20 @@ class FanzaAutoInputApp:
                 )
 
                 # UI更新はメインスレッドで実行
-                self.root.after(0, lambda: self._apply_fetched_keywords(keyword_ids, is_trailer))
+                self.root.after(0, lambda: self._apply_fetched_keywords(keyword_ids, target))
             except Exception as e:
                 self.status_var.set(f"エラー: {e}")
                 messagebox.showerror("エラー", str(e))
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _apply_fetched_keywords(self, keyword_ids, is_trailer: bool):
-        """取得したキーワードIDを選択状態に反映（メインスレッドから呼ぶ）"""
-        if is_trailer:
+    def _apply_fetched_keywords(self, keyword_ids, target: str):
+        """取得したキーワードIDを選択状態に反映（メインスレッドから呼ぶ）
+        target: "main"=作品入力 / "trailer"=予約作品 / "game"=ゲーム出品"""
+        if target == "trailer":
             selected = self.trailer_selected_keywords
+        elif target == "game":
+            selected = self.game_selected_keywords
         else:
             selected = self.selected_keywords
 
@@ -3051,9 +3055,11 @@ class FanzaAutoInputApp:
                 selected.append(kid)
                 added += 1
 
-        if is_trailer:
+        if target == "trailer":
             self.update_trailer_keyword_display()
             self.update_trailer_keyword_button_styles()
+        elif target == "game":
+            self.update_game_keyword_display()
         else:
             self.update_keyword_display()
             self.update_keyword_button_styles()
@@ -3070,11 +3076,15 @@ class FanzaAutoInputApp:
 
     def fetch_keywords_from_page(self):
         """作品入力タブ: 開いているページからキーワードを取得"""
-        self._fetch_keywords_from_page(getattr(self, "current_profile_id", None), is_trailer=False)
+        self._fetch_keywords_from_page(getattr(self, "current_profile_id", None), "main")
 
     def fetch_trailer_keywords_from_page(self):
         """予約作品タブ: 開いているページからキーワードを取得"""
-        self._fetch_keywords_from_page(getattr(self, "trailer_current_profile_id", None), is_trailer=True)
+        self._fetch_keywords_from_page(getattr(self, "trailer_current_profile_id", None), "trailer")
+
+    def fetch_game_keywords_from_page(self):
+        """ゲーム出品タブ: 開いているページからキーワードを取得"""
+        self._fetch_keywords_from_page(getattr(self, "game_current_profile_id", None), "game")
 
     def create_keyword_buttons(self, parent, keywords):
         """キーワードボタンを作成（スクロール対応）"""
