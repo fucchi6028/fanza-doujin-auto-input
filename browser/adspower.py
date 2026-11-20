@@ -19,6 +19,15 @@ from selenium.webdriver.chrome.options import Options
 LOCAL_PROFILE_PREFIX = "LOCAL-"
 
 
+def _guard_cookies(driver, profile_id: str):
+    """接続直後に DMM の Cookie 肥大化（400 Bad Request の原因）を掃除する。失敗しても続行。"""
+    try:
+        from browser.cookie_guard import clean_dmm_cookies
+        clean_dmm_cookies(driver, profile_id)
+    except Exception as e:
+        print(f"Cookie掃除をスキップ: {e}")
+
+
 def is_local_profile(profile_id: str) -> bool:
     """AdsPowerを介さずローカルChromeで動かすプロファイルか判定する"""
     return bool(profile_id) and str(profile_id).startswith(LOCAL_PROFILE_PREFIX)
@@ -231,6 +240,7 @@ class AdsPowerBrowser:
         self.last_error = ""
         for attempt in range(retries + 1):
             if self._connect_once(profile_id):
+                _guard_cookies(self.driver, profile_id)
                 return True
             print(f"Browser start failed (attempt {attempt + 1}/{retries + 1}): {self.last_error}")
             if attempt < retries:
@@ -380,6 +390,7 @@ class LocalBrowser:
                 self.profile_id = profile_id
                 self.last_error = ""
                 print(f"Local browser attached: {profile_id} (port {port})")
+                _guard_cookies(self.driver, profile_id)
                 return True
             print(f"Local browser attach failed "
                   f"(attempt {attempt + 1}/{retries + 1}): {self.last_error}")
