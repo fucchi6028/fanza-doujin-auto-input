@@ -92,6 +92,18 @@ def extract_keywords_from_page(driver, callback=None, max_keywords: int = 10):
         except Exception:
             labels = []
 
+        # 登録・編集フォーム（詳細情報ステップ）を開いている場合は、
+        # 選択済みキーワードのタグ（li.keyword-input-tag）から取得する
+        try:
+            got_form = False
+            for li in driver.find_elements(By.CSS_SELECTOR, "li.keyword-input-tag"):
+                if _add(li.text, "form-tag"):
+                    got_form = True
+            if got_form:
+                return
+        except Exception:
+            pass
+
         for label in labels:
             # ラベルの祖先（行・ブロック）を辿り、その中のリンク <a> のみを対象にする
             containers = []
@@ -2222,6 +2234,10 @@ class FanzaFormalRegistrationFiller(FanzaFormFiller):
             else:
                 self._report("枚数の入力欄が見つかりませんでした（要確認）")
 
+        # 0.5 キーワード（詳細情報ステップ）: 予告から引き継がれず空のことがあるので、
+        #     空ならツール側のキーワードを入力する（入っていれば変更しない）。
+        self._fill_keywords_if_empty(data.get("keywords") or [])
+
         # ステップ形式のページでは、キャンペーン・割引・配信開始日は
         # 最後の「販売情報・その他」ステップにあるため、そこまで「次へ」で進める。
         if not self._advance_until(
@@ -2302,6 +2318,47 @@ class FanzaFormalRegistrationFiller(FanzaFormFiller):
 
         self._report("=== 配信申請: 入力完了（内容を確認して手動で申請してください） ===")
         return "done"
+
+    KEYWORD_AREA_SELECTOR = (
+        "ul.keyword-input-tags, li.keyword-recommend-tag, input[name='keywords[]']"
+    )
+
+    def _count_selected_keywords(self) -> int:
+        """詳細情報ステップで現在選択されているキーワード数を返す。
+
+        選択済みキーワードは入力欄の li.keyword-input-tag に並ぶ（全カテゴリ分）。
+        取れない場合は、人気タグの選択状態と表示中タブのチェック数で代用する。
+        """
+        try:
+            n = len(self.driver.find_elements(By.CSS_SELECTOR, "li.keyword-input-tag"))
+            if n:
+                return n
+            return len(self.driver.find_elements(
+                By.CSS_SELECTOR,
+                "li.keyword-recommend-selected, input[name='keywords[]']:checked",
+            ))
+        except Exception:
+            return 0
+
+    def _fill_keywords_if_empty(self, keywords: list):
+        """配信申請ページのキーワードが空なら、渡されたキーワードを選択する。"""
+        if not self._advance_until(self.KEYWORD_AREA_SELECTOR):
+            self._report("キーワード欄を表示できませんでした（要確認）")
+            return
+        time.sleep(0.5)  # 選択済みタグの描画待ち
+        current = self._count_selected_keywords()
+        if current > 0:
+            self._report(f"キーワード: 入力済み（{current}個）のため変更しません")
+            return
+        if not keywords:
+            self._report(
+                "キーワードが未入力です（ツール側にもキーワードがありません。"
+                "配信申請タブでキーワードを選ぶか、ページから取得してください）"
+            )
+            return
+        self._report("キーワードが未入力のため、ツールのキーワードを入力します")
+        self.step6_select_keywords(keywords)
+        self._report(f"キーワード入力後: {self._count_selected_keywords()}個")
 
     def _read_field_value(self, selector: str):
         """指定セレクタの入力欄の現在値を取得する（JS優先・複数手段）。無ければ ''。"""

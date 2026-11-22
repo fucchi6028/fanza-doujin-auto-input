@@ -303,6 +303,8 @@ class FanzaAutoInputApp:
         self.formal_file_number_var = tk.StringVar()                 # 枚数（伏字ZIPから再取得）
         self.formal_release_date_type_var = tk.StringVar(value="1")  # 配信開始日指定（デフォルト: 最短で公開）
         self.formal_current_profile_id = None
+        self.formal_selected_keywords = []                           # 配信申請ページが未入力のとき入れるキーワード
+        self.formal_keyword_buttons = {}
 
         # ゲーム出品用UI変数
         self.game_release_dir_var = tk.StringVar(value=game_release.load_release_dir())
@@ -1681,8 +1683,13 @@ class FanzaAutoInputApp:
             font=("Meiryo UI", 10), relief=tk.FLAT, padx=8, pady=8)
         self.game_note_text.pack(padx=5, pady=2)
 
-    def _create_game_keyword_buttons(self, parent, keywords):
-        """ゲーム出品用キーワードボタン（スクロール対応）"""
+    def _create_game_keyword_buttons(self, parent, keywords, toggle=None, buttons=None):
+        """ゲーム出品用キーワードボタン（スクロール対応）。
+        toggle/buttons を渡すと他タブ（配信申請など）でも使える。"""
+        if toggle is None:
+            toggle = self.toggle_game_keyword
+        if buttons is None:
+            buttons = self.game_keyword_buttons
         c = self.COLORS
         canvas = tk.Canvas(parent, height=180, bg=c["bg"], highlightthickness=0)
         scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
@@ -1705,9 +1712,9 @@ class FanzaAutoInputApp:
             kid, name = item[0], item[1]
             display_name = name[:8] + ".." if len(name) > 8 else name
             btn = ttk.Button(btn_frame, text=display_name, width=10, style="Keyword.TButton",
-                             command=lambda k=kid: self.toggle_game_keyword(k))
+                             command=lambda k=kid: toggle(k))
             btn.grid(row=i // cols, column=i % cols, padx=1, pady=1, sticky="w")
-            self.game_keyword_buttons.setdefault(kid, []).append(btn)
+            buttons.setdefault(kid, []).append(btn)
             btn.bind("<MouseWheel>", on_mousewheel)
 
     def toggle_game_keyword(self, keyword_id):
@@ -1979,6 +1986,7 @@ class FanzaAutoInputApp:
                 "作品管理ページから伏字タイトルで該当作品の配信申請ページを自動で開き、\n"
                 "枚数（伏字ZIPから自動再取得）・キャンペーン自動参加・割引設定・配信開始日（最短で公開）を\n"
                 "入力します（申請の送信は手動で行ってください）。\n"
+                "キーワードが空の場合は、下のキーワード（保存済み／ページから取得）を入力します。\n"
                 "さらに説明文をローカルの正しい説明文と照合し、違っていれば差分を確認のうえ書き換えます。\n"
                 "※作品を選ばない場合は、すでに開いている配信申請ページに入力します（説明文照合はスキップ）。"
             ),
@@ -2020,6 +2028,36 @@ class FanzaAutoInputApp:
         ttk.Button(select_frame, text="枚数を再取得", command=self.fetch_formal_file_number).grid(
             row=2, column=2, sticky=tk.W, padx=5, pady=2
         )
+
+        # === キーワードセクション ===
+        # 配信申請ページのキーワードが空のときだけ、ここで選んだキーワードを入力する
+        # （すでに入っている場合はページ側を優先して変更しない）。
+        keyword_frame = ttk.LabelFrame(
+            scrollable_frame, text="キーワード（最大10個・配信申請ページが未入力のときに入力）", padding=10)
+        keyword_frame.pack(fill=tk.X, padx=5, pady=5)
+        kw_status = ttk.Frame(keyword_frame)
+        kw_status.pack(fill=tk.X, pady=5)
+        self.formal_keyword_label = ttk.Label(kw_status, text="選択中: 0/10")
+        self.formal_keyword_label.pack(side=tk.LEFT)
+        ttk.Button(kw_status, text="キーワード保存", command=self.save_formal_keywords_to_storage,
+                   style="Success.TButton").pack(side=tk.RIGHT, padx=5)
+        ttk.Button(kw_status, text="ページから取得", command=self.fetch_formal_keywords_from_page).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(kw_status, text="クリア", command=self.clear_formal_keywords).pack(side=tk.RIGHT, padx=5)
+        self.formal_keyword_display = ttk.Label(keyword_frame, text="(なし)", wraplength=900, foreground=c["success"])
+        self.formal_keyword_display.pack(anchor=tk.W, pady=5)
+        kw_notebook = ttk.Notebook(keyword_frame)
+        kw_notebook.pack(fill=tk.BOTH, expand=True, pady=5)
+        popular_tab = ttk.Frame(kw_notebook)
+        kw_notebook.add(popular_tab, text="人気")
+        self._create_game_keyword_buttons(
+            popular_tab, [(kid, name) for kid, name in POPULAR_KEYWORDS],
+            toggle=self.toggle_formal_keyword, buttons=self.formal_keyword_buttons)
+        for cat_id, cat_name in KEYWORD_CATEGORIES:
+            tab = ttk.Frame(kw_notebook)
+            kw_notebook.add(tab, text=cat_name[:6])
+            self._create_game_keyword_buttons(
+                tab, KEYWORDS_BY_CATEGORY.get(cat_id, []),
+                toggle=self.toggle_formal_keyword, buttons=self.formal_keyword_buttons)
 
         # === キャンペーン・割引設定セクション ===
         campaign_frame = ttk.LabelFrame(scrollable_frame, text="キャンペーン・割引設定", padding=10)
@@ -2089,6 +2127,8 @@ class FanzaAutoInputApp:
             self.formal_product_combo['values'] = []
             self.formal_product_combo.set('')
             self.formal_file_number_var.set('')
+            self.formal_selected_keywords = []
+            self.update_formal_keyword_display()
 
             # プロファイル名の数字と一致するベースフォルダを自動選択
             match_idx = find_matching_base_folder_index(profile.profile_name, folder_names)
@@ -2117,6 +2157,46 @@ class FanzaAutoInputApp:
             self.formal_product_combo['values'] = get_subfolders(str(series_path))
             self.formal_product_combo.set('')
             self.formal_file_number_var.set('')
+
+            # 保存済みキーワードを読み込み（作品入力・予約作品タブと同じ プロファイル＋シリーズ）
+            saved = self.keyword_storage.get_keywords_by_profile_series(
+                self.formal_current_profile_id, self.formal_current_series_folder) or []
+            self.formal_selected_keywords = list(saved)
+            self.update_formal_keyword_display()
+
+    def toggle_formal_keyword(self, keyword_id):
+        if keyword_id in self.formal_selected_keywords:
+            self.formal_selected_keywords.remove(keyword_id)
+        elif len(self.formal_selected_keywords) < 10:
+            self.formal_selected_keywords.append(keyword_id)
+        self.update_formal_keyword_display()
+
+    def clear_formal_keywords(self):
+        self.formal_selected_keywords.clear()
+        self.update_formal_keyword_display()
+
+    def update_formal_keyword_display(self):
+        if not hasattr(self, "formal_keyword_display"):
+            return
+        names = [get_keyword_name(k) for k in self.formal_selected_keywords]
+        self.formal_keyword_display.config(text=", ".join(names) if names else "(なし)")
+        self.formal_keyword_label.config(text=f"選択中: {len(self.formal_selected_keywords)}/10")
+        for kid, btn_list in self.formal_keyword_buttons.items():
+            style = "Selected.TButton" if kid in self.formal_selected_keywords else "Keyword.TButton"
+            for btn in btn_list:
+                btn.configure(style=style)
+
+    def save_formal_keywords_to_storage(self):
+        if not self.formal_current_profile_id:
+            messagebox.showwarning("警告", "プロファイルを選択してください")
+            return
+        series = getattr(self, "formal_current_series_folder", None)
+        if not series:
+            messagebox.showwarning("警告", "シリーズを選択してください")
+            return
+        self.keyword_storage.save_keywords_by_profile_series(
+            self.formal_current_profile_id, series, self.formal_selected_keywords.copy())
+        messagebox.showinfo("保存完了", f"キーワードを保存しました\nシリーズ: {series}")
 
     def on_formal_product_change(self, event):
         """配信申請タブで商品フォルダ選択時"""
@@ -2194,6 +2274,7 @@ class FanzaAutoInputApp:
             "release_date_type": self.formal_release_date_type_var.get(),
             "masked_title": masked_title,
             "masked_product": masked_product,
+            "keywords": self.formal_selected_keywords.copy(),
         }
 
         def run():
@@ -3041,11 +3122,13 @@ class FanzaAutoInputApp:
 
     def _apply_fetched_keywords(self, keyword_ids, target: str):
         """取得したキーワードIDを選択状態に反映（メインスレッドから呼ぶ）
-        target: "main"=作品入力 / "trailer"=予約作品 / "game"=ゲーム出品"""
+        target: "main"=作品入力 / "trailer"=予約作品 / "game"=ゲーム出品 / "formal"=配信申請"""
         if target == "trailer":
             selected = self.trailer_selected_keywords
         elif target == "game":
             selected = self.game_selected_keywords
+        elif target == "formal":
+            selected = self.formal_selected_keywords
         else:
             selected = self.selected_keywords
 
@@ -3060,6 +3143,8 @@ class FanzaAutoInputApp:
             self.update_trailer_keyword_button_styles()
         elif target == "game":
             self.update_game_keyword_display()
+        elif target == "formal":
+            self.update_formal_keyword_display()
         else:
             self.update_keyword_display()
             self.update_keyword_button_styles()
@@ -3085,6 +3170,10 @@ class FanzaAutoInputApp:
     def fetch_game_keywords_from_page(self):
         """ゲーム出品タブ: 開いているページからキーワードを取得"""
         self._fetch_keywords_from_page(getattr(self, "game_current_profile_id", None), "game")
+
+    def fetch_formal_keywords_from_page(self):
+        """配信申請タブ: 開いているページからキーワードを取得"""
+        self._fetch_keywords_from_page(getattr(self, "formal_current_profile_id", None), "formal")
 
     def create_keyword_buttons(self, parent, keywords):
         """キーワードボタンを作成（スクロール対応）"""
