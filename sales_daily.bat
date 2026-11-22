@@ -13,7 +13,7 @@ rem リダイレクトは行頭に置く。末尾に置くと %RC% の数字と >> がくっついて壊れる。
 "%PY%" sales_daily.py %*
 set "RC=%errorlevel%"
 rem 一部未取得（RC=1）でも、取れているぶんは共有ページに反映しておく
-"%PY%" sales_publish.py
-set "RC2=%errorlevel%"
+rem sales_publish.py is called by sales_daily.py itself (inside keep_awake)
+set "RC2=in-daily"
 >>"%~dp0logs\sales_task.log" echo [%date% %time%] end daily=%RC% publish=%RC2%
 exit /b %RC%
